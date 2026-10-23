@@ -13,8 +13,9 @@ class TeslaNaviApp : Application() {
     val drive by lazy { DriveController(this, keys) }
     val autoConnect by lazy { AutoConnectSettings(this) }
     val kakao by lazy { KakaoSettings(this) }
+    val guidance by lazy { GuidanceSettings(this) }
     val cameras by lazy {
-        CameraController(KakaoNavigationEngine(this, kakao), AndroidCameraSpeaker(this), android.os.SystemClock::elapsedRealtime)
+        CameraController(KakaoNavigationEngine(this, kakao), AndroidCameraSpeaker(this), guidance.options, android.os.SystemClock::elapsedRealtime)
             .also { it.configured(kakao.hasKey.value) }
     }
 }

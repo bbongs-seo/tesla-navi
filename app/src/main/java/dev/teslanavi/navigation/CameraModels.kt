@@ -40,6 +40,7 @@ interface CameraSpeaker {
     suspend fun initialize(): String?
     fun speak(text: String): Boolean
     fun setOverSpeedAlert(active: Boolean) {}
+    fun setVolume(percent: Int) {}
     fun silence()
     fun close()
 }
@@ -64,8 +65,8 @@ class CameraAlertPolicy {
     data class Announcement(val cameraId: String, val text: String, val atMillis: Long)
     private val announced = linkedMapOf<String, Long>()
 
-    fun next(camera: CameraReading, roadClass: RoadClass, nowMillis: Long): Announcement? {
-        if (camera.distanceMeters !in 0..roadClass.cameraAlertMeters) return null
+    fun next(camera: CameraReading, roadClass: RoadClass, nowMillis: Long, options: GuidanceOptions = GuidanceOptions()): Announcement? {
+        if (camera.distanceMeters !in 0..options.distance(roadClass)) return null
         announced.entries.removeAll { nowMillis - it.value > 5 * 60 * 1000 }
         if (camera.id in announced) return null
         val distance = if (camera.distanceMeters < 50) "잠시 후" else "${((camera.distanceMeters + 50) / 100) * 100}미터 앞"
@@ -86,14 +87,14 @@ class OverSpeedPolicy {
     data class Announcement(val text: String, val atMillis: Long)
     private var lastSpokenAt: Long? = null
 
-    fun isOverSpeed(camera: CameraReading?, speedKph: Double?, roadClass: RoadClass): Boolean {
+    fun isOverSpeed(camera: CameraReading?, speedKph: Double?, roadClass: RoadClass, options: GuidanceOptions = GuidanceOptions()): Boolean {
         val limit = camera?.speedLimitKph?.takeIf { it > 0 } ?: return false
-        return !camera.variableLimit && camera.distanceMeters in 0..roadClass.cameraAlertMeters &&
+        return !camera.variableLimit && camera.distanceMeters in 0..options.distance(roadClass) &&
             speedKph?.let { it.isFinite() && it >= limit.toDouble() + 5.0 } == true
     }
 
-    fun next(camera: CameraReading?, speedKph: Double?, roadClass: RoadClass, nowMillis: Long): Announcement? {
-        if (!isOverSpeed(camera, speedKph, roadClass)) { lastSpokenAt = null; return null }
+    fun next(camera: CameraReading?, speedKph: Double?, roadClass: RoadClass, nowMillis: Long, options: GuidanceOptions = GuidanceOptions()): Announcement? {
+        if (!isOverSpeed(camera, speedKph, roadClass, options)) { lastSpokenAt = null; return null }
         if (lastSpokenAt != null) return null
         return Announcement("제한속도 ${camera!!.speedLimitKph}킬로미터 초과입니다.", nowMillis)
     }

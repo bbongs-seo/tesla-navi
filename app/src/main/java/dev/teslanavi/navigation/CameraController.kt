@@ -10,6 +10,7 @@ import kotlinx.coroutines.flow.*
 class CameraController(
     private val engine: CameraNavigationEngine,
     private val speaker: CameraSpeaker,
+    private val settings: StateFlow<GuidanceOptions> = MutableStateFlow(GuidanceOptions()),
     private val clock: () -> Long,
 ) {
     private val _state = MutableStateFlow(CameraState())
@@ -52,6 +53,9 @@ class CameraController(
         try {
             coroutineScope {
                 _state.update { it.copy(phase = CameraPhase.WAITING_VEHICLE, message = "차량 연결을 기다리고 있습니다", error = null) }
+                launch(start = CoroutineStart.UNDISPATCHED) {
+                    settings.collect { speaker.setVolume(it.volumePercent) }
+                }
                 val movement = TripMotionGate()
                 var initialized = false
                 launch(start = CoroutineStart.UNDISPATCHED) {
@@ -83,7 +87,7 @@ class CameraController(
                                     ?.snapshot?.speedKph?.takeIf { it.isFinite() && it >= 0 }
                                 val speed = if (fresh) carSpeed ?: event.speedKph?.takeIf { it >= 0 }?.toDouble() else null
                                 val road = if (fresh) event.roadClass else RoadClass.UNKNOWN
-                                val overSpeed = overSpeedPolicy.isOverSpeed(cameras.firstOrNull(), speed, road)
+                                val overSpeed = overSpeedPolicy.isOverSpeed(cameras.firstOrNull(), speed, road, settings.value)
                                 _state.update { it.copy(phase = if (fresh) CameraPhase.GUIDING else CameraPhase.WAITING_GPS,
                                     cameras = cameras, locationAtMillis = event.locationAtMillis,
                                     currentSpeedKph = speed, roadClass = road, overSpeed = overSpeed) }
@@ -91,8 +95,8 @@ class CameraController(
                                 if (!fresh) speaker.silence()
                                 if (fresh && !_state.value.muted && _state.value.voiceError == null) {
                                     val now = clock()
-                                    val presence = cameras.firstNotNullOfOrNull { policy.next(it, road, now) }
-                                    val speedWarning = overSpeedPolicy.next(cameras.firstOrNull(), speed, road, now)
+                                    val presence = cameras.firstNotNullOfOrNull { policy.next(it, road, now, settings.value) }
+                                    val speedWarning = overSpeedPolicy.next(cameras.firstOrNull(), speed, road, now, settings.value)
                                     val presenceWithWarning = presence?.takeIf {
                                         speedWarning == null || it.cameraId == cameras.firstOrNull()?.id
                                     }

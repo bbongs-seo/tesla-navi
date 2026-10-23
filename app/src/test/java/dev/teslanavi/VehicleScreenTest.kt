@@ -2,6 +2,7 @@ package dev.teslanavi
 
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.semantics.SemanticsActions
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import androidx.test.core.app.ApplicationProvider
@@ -19,6 +20,21 @@ import java.io.File
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 class VehicleScreenTest {
     @get:Rule val compose = createAndroidComposeRule<MainActivity>()
+
+    @Test fun guidanceControlsSaveAndReopenAtSelectedValues() {
+        compose.onNodeWithText("안내 설정").performClick()
+        compose.onNodeWithContentDescription("안내 음량").performSemanticsAction(SemanticsActions.SetProgress) { it(35f) }
+        compose.onNodeWithContentDescription("고속도로 안내 거리").performSemanticsAction(SemanticsActions.SetProgress) { it(1200f) }
+        compose.onNodeWithContentDescription("일반도로 안내 거리").performSemanticsAction(SemanticsActions.SetProgress) { it(600f) }
+        compose.onNodeWithText("닫기").performClick()
+        compose.onNodeWithText("안내 설정").performClick()
+        compose.onNodeWithText("안내 음량 35%").assertIsDisplayed()
+        compose.onNodeWithText("고속도로 1200 m 전").assertIsDisplayed()
+        compose.onNodeWithText("일반도로 600 m 전").assertIsDisplayed()
+        saveScreenshot("guidance-settings")
+        compose.onNodeWithText("기본값 복원").performScrollTo().performClick()
+        compose.onNodeWithText("고속도로 500 m 전").performScrollTo().assertIsDisplayed()
+    }
 
     @Test fun firstLaunchShowsRegistrationAndDisabledConnection() {
         compose.onNodeWithText("첫 차량을 등록해 주세요").assertIsDisplayed()

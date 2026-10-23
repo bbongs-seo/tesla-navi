@@ -20,6 +20,32 @@ class CameraControllerTest {
     private fun connected(goal: NavigationDestination = destination, vin: String = "vehicle-a", speed: Double? = 10.0, gear: Gear = Gear.DRIVE) = DriveState(
         vin = vin, phase = DrivePhase.CONNECTED, snapshot = DriveSnapshot(goal, speed, null, null, gear))
 
+    @Test fun changingDistanceAppliesToNextFrameWithoutRestartingRoute() = runTest {
+        val engine = FakeNavigationEngine()
+        val speaker = FakeSpeaker()
+        val options = MutableStateFlow(GuidanceOptions())
+        val controller = CameraController(engine, speaker, options) { testScheduler.currentTime }
+        val job = backgroundScope.launch { controller.run("key", MutableStateFlow(connected())) }
+        runCurrent()
+        engine.frame(listOf(camera.copy(distanceMeters = 700)), 0, road = RoadClass.HIGHWAY, speed = 65)
+        runCurrent()
+        assertFalse(speaker.alarm)
+        assertTrue(speaker.spoken.isEmpty())
+        options.value = GuidanceOptions(highwayMeters = 800)
+        runCurrent()
+        engine.frame(listOf(camera.copy(distanceMeters = 700)), 0, road = RoadClass.HIGHWAY, speed = 65)
+        runCurrent()
+        assertTrue(speaker.alarm)
+        assertTrue(speaker.spoken.single().contains("700미터"))
+        assertEquals(1, engine.destinations.size)
+        options.value = GuidanceOptions(highwayMeters = 400)
+        runCurrent()
+        engine.frame(listOf(camera.copy(distanceMeters = 700)), 0, road = RoadClass.HIGHWAY, speed = 65)
+        runCurrent()
+        assertFalse(speaker.alarm)
+        job.cancelAndJoin()
+    }
+
     @Test fun tripStartIsOnceAcrossDestinationAndReconnectAndRearmsInPark() = runTest {
         val engine = FakeNavigationEngine()
         val speaker = FakeSpeaker()

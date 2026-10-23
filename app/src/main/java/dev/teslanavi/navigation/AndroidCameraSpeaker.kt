@@ -24,8 +24,7 @@ class AndroidCameraSpeaker(private val context: Context) : CameraSpeaker {
     private var focus: AudioFocusRequest? = null
     private var alarm = false
     private var track: AudioTrack? = null
-    private var originalVolume: Int? = null
-    private var boostedVolume: Int? = null
+    private var gain = 1f
     private val alarmLoop = object : Runnable {
         override fun run() {
             if (!alarm) return
@@ -48,6 +47,7 @@ class AndroidCameraSpeaker(private val context: Context) : CameraSpeaker {
                                 bytes[i * 2] = value.toByte(); bytes[i * 2 + 1] = (value.toInt() shr 8).toByte()
                             }
                             check(write(bytes, 0, bytes.size) == bytes.size) { "경고음 PCM 데이터 전송 실패" }
+                            setVolume(gain)
                             play()
                         }
                 }.onFailure { android.util.Log.w("TeslaNaviAudio", "과속 경고음 출력 실패", it); setOverSpeedAlert(false) }
@@ -86,12 +86,12 @@ class AndroidCameraSpeaker(private val context: Context) : CameraSpeaker {
 
     override fun speak(text: String): Boolean {
         val engine = tts ?: return false
-        if (utterance != null) return false
+        if (utterance != null || gain == 0f) return false
         track?.pause()
         if (!acquireFocus()) return false
         val id = UUID.randomUUID().toString()
         utterance = id
-        if (engine.speak(text, TextToSpeech.QUEUE_FLUSH, Bundle(), id) != TextToSpeech.SUCCESS) {
+        if (engine.speak(text, TextToSpeech.QUEUE_FLUSH, Bundle().apply { putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, gain) }, id) != TextToSpeech.SUCCESS) {
             utterance = null; releaseFocus(); return false
         }
         return true
@@ -107,16 +107,17 @@ class AndroidCameraSpeaker(private val context: Context) : CameraSpeaker {
             }, handler).build()
         if (audio.requestAudioFocus(request) != AudioManager.AUDIOFOCUS_REQUEST_GRANTED) return false
         focus = request
-        runCatching {
-            val before = audio.getStreamVolume(AudioManager.STREAM_MUSIC)
-            val raised = ceil(before * 1.3).toInt().coerceAtMost(audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC))
-            originalVolume = before; boostedVolume = raised
-            if (raised != before) audio.setStreamVolume(AudioManager.STREAM_MUSIC, raised, 0)
-        }
         return true
     }
 
+    override fun setVolume(percent: Int) {
+        gain = percent.coerceIn(0, 100) / 100f
+        track?.setVolume(gain)
+        if (gain == 0f) silence()
+    }
+
     override fun setOverSpeedAlert(active: Boolean) {
+        if (active && gain == 0f) return
         if (alarm == active) return
         alarm = active
         handler.removeCallbacks(alarmLoop)
@@ -127,11 +128,7 @@ class AndroidCameraSpeaker(private val context: Context) : CameraSpeaker {
     override fun silence() { setOverSpeedAlert(false); utterance = null; tts?.stop(); releaseFocus() }
     private fun releaseFocus() {
         focus?.let { audio.abandonAudioFocusRequest(it) }; focus = null
-        runCatching {
-            if (originalVolume != null && audio.getStreamVolume(AudioManager.STREAM_MUSIC) == boostedVolume)
-                audio.setStreamVolume(AudioManager.STREAM_MUSIC, originalVolume!!, 0)
-        }
-        originalVolume = null; boostedVolume = null
+
     }
     override fun close() { silence(); tts?.shutdown(); tts = null }
 }

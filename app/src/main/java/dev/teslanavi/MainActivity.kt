@@ -45,6 +45,7 @@ import dev.teslanavi.protocol.VehicleIdentity
 import dev.teslanavi.navigation.*
 import kotlinx.coroutines.delay
 import java.util.Locale
+import kotlin.math.roundToInt
 
 private val Ink = Color(0xFF101419)
 private val Panel = Color(0xFF1A2028)
@@ -94,8 +95,11 @@ class MainActivity : ComponentActivity() {
                 val hasKakaoKey by app.kakao.hasKey.collectAsStateWithLifecycle()
                 val autoEnabled by app.autoConnect.enabled.collectAsStateWithLifecycle()
                 val autoStatus by app.autoConnect.status.collectAsStateWithLifecycle()
+                val guidanceOptions by app.guidance.options.collectAsStateWithLifecycle()
+                var showGuidance by remember { mutableStateOf(false) }
                 Surface(Modifier.fillMaxSize(), color = Ink) {
-                    VehicleScreen(profiles, selected, state, cameras, hasKakaoKey, localError.value, autoEnabled, autoStatus,
+                    VehicleScreen(profiles, selected, state, cameras, hasKakaoKey, localError.value, autoEnabled, autoStatus, guidanceOptions,
+                        onSettings = { showGuidance = true },
                         onAdd = { model, vin -> app.vehicles.add(model, vin); app.drive.clear(); localError.value = null },
                         onSelect = { app.vehicles.select(it); app.drive.clear(); localError.value = null },
                         onConnect = { enroll -> begin(enroll) },
@@ -104,6 +108,7 @@ class MainActivity : ComponentActivity() {
                         onAutomatic = { enabled -> if (enabled) beginAutomatic() else AutoConnectService.disable(this) },
                         onMute = { app.cameras.setMuted(it) })
                 }
+                if (showGuidance) GuidanceSettingsDialog(app.guidance) { showGuidance = false }
                 if (backgroundDisclosure.value) AlertDialog(
                     onDismissRequest = { backgroundDisclosure.value = false; pendingAutomatic = false },
                     title = { Text("자동 연결에 필요한 위치 권한") },
@@ -197,7 +202,7 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 private fun VehicleScreen(profiles: List<VehicleProfile>, selected: String?, state: DriveState,
-    cameras: CameraState, hasKakaoKey: Boolean, localError: String?, autoEnabled: Boolean, autoStatus: String,
+    cameras: CameraState, hasKakaoKey: Boolean, localError: String?, autoEnabled: Boolean, autoStatus: String, options: GuidanceOptions, onSettings: () -> Unit,
     onAdd: (String, String) -> Unit, onSelect: (String) -> Unit, onConnect: (Boolean) -> Unit,
     onDisconnect: () -> Unit, onRefresh: () -> Unit, onAutomatic: (Boolean) -> Unit, onMute: (Boolean) -> Unit) {
     var showAdd by remember { mutableStateOf(false) }
@@ -221,11 +226,14 @@ private fun VehicleScreen(profiles: List<VehicleProfile>, selected: String?, sta
                 Spacer(Modifier.height(8.dp))
                 Text("내 차의 목적지", fontSize = 25.sp, fontWeight = FontWeight.Bold)
             }
-            Surface(color = Color(0xFF243039), shape = RoundedCornerShape(50)) {
-                Text(if (state.phase == DrivePhase.CONNECTED) "● 연결됨" else "● 대기", Modifier.padding(12.dp, 8.dp), color = Mint, fontSize = 12.sp)
+            Column(horizontalAlignment = Alignment.End) {
+                Surface(color = Color(0xFF243039), shape = RoundedCornerShape(50)) {
+                    Text(if (state.phase == DrivePhase.CONNECTED) "● 연결됨" else "● 대기", Modifier.padding(12.dp, 8.dp), color = Mint, fontSize = 12.sp)
+                }
+                TextButton(onClick = onSettings) { Text("안내 설정") }
             }
         }
-        if (state.phase == DrivePhase.CONNECTED) CameraCard(cameras, hasKakaoKey, onMute)
+        if (state.phase == DrivePhase.CONNECTED) CameraCard(cameras, hasKakaoKey, onMute, options)
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
                 Text("내 차량", fontWeight = FontWeight.SemiBold)
@@ -304,7 +312,7 @@ private fun VehicleScreen(profiles: List<VehicleProfile>, selected: String?, sta
                 else -> "${age}초 전 확인 · 5초마다 갱신"
             }, color = Muted, fontSize = 12.sp)
         }
-        if (state.phase != DrivePhase.CONNECTED) CameraCard(cameras, hasKakaoKey, onMute)
+        if (state.phase != DrivePhase.CONNECTED) CameraCard(cameras, hasKakaoKey, onMute, options)
         TextButton(onClick = { diagnostics = !diagnostics }, modifier = Modifier.fillMaxWidth()) { Text(if (diagnostics) "연결 기록 접기" else "연결 기록 보기", color = Muted) }
         if (diagnostics) AppCard {
             Text("연결 기록", fontWeight = FontWeight.SemiBold)
@@ -333,7 +341,7 @@ private fun VehicleScreen(profiles: List<VehicleProfile>, selected: String?, sta
 }
 
 @Composable
-private fun CameraCard(state: CameraState, hasKey: Boolean, onMute: (Boolean) -> Unit) {
+private fun CameraCard(state: CameraState, hasKey: Boolean, onMute: (Boolean) -> Unit, options: GuidanceOptions) {
     AppCard {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
             Text("단속카메라 안내", fontWeight = FontWeight.SemiBold)
@@ -369,9 +377,9 @@ private fun CameraCard(state: CameraState, hasKey: Boolean, onMute: (Boolean) ->
             Text(if (it == NavigationMode.ROUTE) "카카오 경로 기준 · 테슬라 경로와 다를 수 있습니다" else "현재 주행 도로 기준 · 안전운행 모드", color = Muted, fontSize = 11.sp)
         }
         if (state.phase == CameraPhase.GUIDING) Text(when (state.roadClass) {
-            RoadClass.HIGHWAY -> "고속도로 · 카메라 500 m 전 안내"
-            RoadClass.GENERAL -> "일반도로 · 카메라 300 m 전 안내"
-            RoadClass.UNKNOWN -> "도로 종류 확인 중 · 카메라 500 m 전 예비 안내"
+            RoadClass.HIGHWAY -> "고속도로 · 카메라 ${options.highwayMeters} m 전 안내"
+            RoadClass.GENERAL -> "일반도로 · 카메라 ${options.generalMeters} m 전 안내"
+            RoadClass.UNKNOWN -> "도로 종류 확인 중 · 카메라 ${options.highwayMeters} m 전 예비 안내"
         }, color = Muted, fontSize = 11.sp)
         if (state.mode != null) Text(state.message, color = Muted, fontSize = 12.sp)
         state.error?.let { Text(it, color = MaterialTheme.colorScheme.error, fontSize = 13.sp) }
@@ -411,4 +419,32 @@ private fun VehicleDialog(onDismiss: () -> Unit, onSave: (String, String) -> Uni
             try { onSave(model, vin) } catch (failure: Exception) { error = failure.message ?: "차량 저장 실패" }
         }, enabled = vin.isNotBlank()) { Text("등록") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("취소") } })
+}
+
+@Composable
+private fun GuidanceSettingsDialog(settings: GuidanceSettings, onDismiss: () -> Unit) {
+    val options by settings.options.collectAsStateWithLifecycle()
+    var volume by remember(options.volumePercent) { mutableFloatStateOf(options.volumePercent.toFloat()) }
+    var highway by remember(options.highwayMeters) { mutableFloatStateOf(options.highwayMeters.toFloat()) }
+    var general by remember(options.generalMeters) { mutableFloatStateOf(options.generalMeters.toFloat()) }
+    AlertDialog(onDismissRequest = onDismiss,
+        title = { Text("안내 설정") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("안내 음량 ${volume.roundToInt()}%", fontWeight = FontWeight.SemiBold)
+                Slider(value = volume, onValueChange = { volume = it }, onValueChangeFinished = { settings.volume(volume.roundToInt()) },
+                    valueRange = 0f..100f, steps = 19, modifier = Modifier.semantics { contentDescription = "안내 음량" })
+                Text("휴대폰 미디어 음량 기준 · 음성과 경고음에 함께 적용", fontSize = 12.sp, color = Muted)
+                Text("고속도로 ${highway.roundToInt()} m 전", fontWeight = FontWeight.SemiBold)
+                Slider(value = highway, onValueChange = { highway = it }, onValueChangeFinished = { settings.highway(highway.roundToInt()) },
+                    valueRange = 100f..2000f, steps = 18, modifier = Modifier.semantics { contentDescription = "고속도로 안내 거리" })
+                Text("일반도로 ${general.roundToInt()} m 전", fontWeight = FontWeight.SemiBold)
+                Slider(value = general, onValueChange = { general = it }, onValueChangeFinished = { settings.general(general.roundToInt()) },
+                    valueRange = 100f..1000f, steps = 8, modifier = Modifier.semantics { contentDescription = "일반도로 안내 거리" })
+                Text("카메라 사전 안내와 +5 km/h 과속 경고 구간에 적용됩니다. 도로 종류를 모르면 고속도로 설정을 사용합니다.", fontSize = 12.sp, color = Muted)
+                Text("설정은 자동 저장됩니다. 카메라 정보 수신 시점에 따라 안내가 늦어질 수 있습니다.", fontSize = 12.sp, color = Muted)
+                TextButton(onClick = { settings.reset() }) { Text("기본값 복원") }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("닫기") } })
 }
