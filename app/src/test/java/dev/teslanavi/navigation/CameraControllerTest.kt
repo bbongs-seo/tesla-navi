@@ -1,0 +1,400 @@
+package dev.teslanavi.navigation
+
+import dev.teslanavi.drive.DrivePhase
+import dev.teslanavi.drive.DriveState
+import dev.teslanavi.protocol.DriveSnapshot
+import dev.teslanavi.protocol.GeoPoint
+import dev.teslanavi.protocol.Gear
+import dev.teslanavi.protocol.NavigationDestination
+import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.test.*
+import org.junit.Assert.*
+import org.junit.Test
+
+@OptIn(ExperimentalCoroutinesApi::class)
+class CameraControllerTest {
+    private val destination = NavigationDestination.Active("서울역", GeoPoint(37.555, 126.971))
+    private val camera = CameraReading("camera-a", CameraKind.SPEED, 60, 400)
+    private fun connected(goal: NavigationDestination = destination, vin: String = "vehicle-a", speed: Double? = 10.0, gear: Gear = Gear.DRIVE) = DriveState(
+        vin = vin, phase = DrivePhase.CONNECTED, snapshot = DriveSnapshot(goal, speed, null, null, gear))
+
+    @Test fun tripStartIsOnceAcrossDestinationAndReconnectAndRearmsInPark() = runTest {
+        val engine = FakeNavigationEngine()
+        val speaker = FakeSpeaker()
+        val controller = CameraController(engine, speaker) { testScheduler.currentTime }
+        val drive = MutableStateFlow(connected())
+        val job = backgroundScope.launch { controller.run("key", drive) }
+        runCurrent(); advanceTimeBy(1001); runCurrent()
+        assertEquals(1, speaker.tripStarts)
+        drive.value = connected(NavigationDestination.None); runCurrent()
+        advanceTimeBy(1001); runCurrent()
+        drive.value = drive.value.copy(phase = DrivePhase.RECONNECTING, snapshot = null); runCurrent()
+        drive.value = connected(); runCurrent(); advanceTimeBy(1001); runCurrent()
+        assertEquals(1, speaker.tripStarts)
+        drive.value = connected(speed = 0.0, gear = Gear.PARK); runCurrent()
+        drive.value = connected(); runCurrent(); advanceTimeBy(1001); runCurrent()
+        assertEquals(2, speaker.tripStarts)
+        job.cancelAndJoin()
+    }
+
+    @Test fun chimeStopsForSlowingMuteAndStaleGps() = runTest {
+        val engine = FakeNavigationEngine()
+        val speaker = FakeSpeaker()
+        val controller = CameraController(engine, speaker) { testScheduler.currentTime }
+        val job = backgroundScope.launch { controller.run("key", MutableStateFlow(connected())) }
+        runCurrent()
+        engine.frame(listOf(camera), 0, speed = 65); runCurrent()
+        assertTrue(speaker.alarm)
+        engine.frame(listOf(camera), 0, speed = 64); runCurrent()
+        assertFalse(speaker.alarm)
+        engine.frame(listOf(camera), 0, speed = 65); runCurrent()
+        assertTrue(speaker.alarm)
+        controller.setMuted(true)
+        assertFalse(speaker.alarm)
+        controller.setMuted(false)
+        engine.frame(listOf(camera), 0, speed = 65); runCurrent()
+        assertTrue(speaker.alarm)
+        advanceTimeBy(11001); runCurrent()
+        assertFalse(speaker.alarm)
+        job.cancelAndJoin()
+    }
+
+    @Test fun generalRoadWaitsUntilThreeHundredMetersAndCombinesPresenceWithSpeedWarning() = runTest {
+        val engine = FakeNavigationEngine()
+        val speaker = FakeSpeaker()
+        val controller = CameraController(engine, speaker) { testScheduler.currentTime }
+        val job = backgroundScope.launch { controller.run("key", MutableStateFlow(connected())) }
+        runCurrent()
+        engine.frame(listOf(camera.copy(distanceMeters = 301)), 0, road = RoadClass.GENERAL, speed = 65); runCurrent()
+        assertTrue(speaker.spoken.isEmpty())
+        engine.frame(listOf(camera.copy(distanceMeters = 300)), 0, road = RoadClass.GENERAL, speed = 65); runCurrent()
+        assertTrue(controller.state.value.overSpeed)
+        assertEquals(1, speaker.spoken.size)
+        assertTrue(speaker.spoken.single().contains("카메라가 있습니다"))
+        assertTrue(speaker.spoken.single().contains("제한속도 60킬로미터 초과입니다"))
+        engine.frame(listOf(camera.copy(distanceMeters = 200)), 0, road = RoadClass.GENERAL, speed = 65); runCurrent()
+        assertEquals(1, speaker.spoken.size)
+        job.cancelAndJoin()
+    }
+
+    @Test fun slowHighwayTrafficStillGetsFiveHundredMeterPresenceWarning() = runTest {
+        val engine = FakeNavigationEngine()
+        val speaker = FakeSpeaker()
+        val controller = CameraController(engine, speaker) { testScheduler.currentTime }
+        val job = backgroundScope.launch { controller.run("key", MutableStateFlow(connected())) }
+        runCurrent()
+        engine.frame(listOf(camera.copy(distanceMeters = 500)), 0, road = RoadClass.HIGHWAY, speed = 30); runCurrent()
+        assertEquals(1, speaker.spoken.size)
+        assertFalse(controller.state.value.overSpeed)
+        job.cancelAndJoin()
+    }
+
+    @Test fun freshTeslaSpeedTakesPriorityButStaleVehicleSpeedFallsBackToTrustedGps() = runTest {
+        val engine = FakeNavigationEngine()
+        val speaker = FakeSpeaker()
+        val controller = CameraController(engine, speaker) { testScheduler.currentTime }
+        val drive = MutableStateFlow(connected(speed = 60.0).copy(updatedAt = System.currentTimeMillis()))
+        val job = backgroundScope.launch { controller.run("key", drive) }
+        runCurrent()
+        engine.frame(listOf(camera), 0, speed = 65); runCurrent()
+        assertFalse(controller.state.value.overSpeed)
+        assertEquals(60.0, controller.state.value.currentSpeedKph!!, 0.001)
+        drive.value = drive.value.copy(updatedAt = System.currentTimeMillis() - 11_000); runCurrent()
+        engine.frame(listOf(camera), 0, speed = 65); runCurrent()
+        assertTrue(controller.state.value.overSpeed)
+        assertEquals(2, speaker.spoken.size)
+        engine.frame(listOf(camera), -10_001, speed = 65); runCurrent()
+        assertFalse(controller.state.value.overSpeed)
+        assertNull(controller.state.value.currentSpeedKph)
+        job.cancelAndJoin()
+    }
+
+    @Test fun rejectedCombinedAlertRetriesAndMuteKeepsSpeedWarningVisible() = runTest {
+        val engine = FakeNavigationEngine()
+        val speaker = FakeSpeaker().apply { acceptsAudio = false }
+        val controller = CameraController(engine, speaker) { testScheduler.currentTime }
+        val job = backgroundScope.launch { controller.run("key", MutableStateFlow(connected())) }
+        runCurrent()
+        engine.frame(listOf(camera), 0, speed = 65); runCurrent()
+        assertTrue(speaker.spoken.isEmpty())
+        assertTrue(controller.state.value.overSpeed)
+        speaker.acceptsAudio = true
+        engine.frame(listOf(camera), 0, speed = 65); runCurrent()
+        assertEquals(1, speaker.spoken.size)
+        controller.setMuted(true)
+        advanceTimeBy(15_000); runCurrent()
+        engine.frame(listOf(camera), testScheduler.currentTime, speed = 65); runCurrent()
+        assertTrue(controller.state.value.overSpeed)
+        assertEquals(1, speaker.spoken.size)
+        controller.setMuted(false)
+        engine.frame(listOf(camera), testScheduler.currentTime, speed = 65); runCurrent()
+        assertEquals(1, speaker.spoken.size)
+        assertTrue(speaker.alarm)
+        job.cancelAndJoin()
+    }
+
+    @Test fun approachAndDestinationDoNotInitializeSdkUntilVehicleMoves() = runTest {
+        val engine = FakeNavigationEngine()
+        val speaker = FakeSpeaker()
+        val controller = CameraController(engine, speaker) { testScheduler.currentTime }
+        val drive = MutableStateFlow(connected(speed = 0.0, gear = Gear.PARK))
+        val job = backgroundScope.launch { controller.run("key", drive) }
+        runCurrent()
+        assertEquals(CameraPhase.WAITING_DRIVE, controller.state.value.phase)
+        assertTrue(engine.keys.isEmpty())
+        drive.value = connected(speed = 2.9); runCurrent()
+        assertTrue(engine.keys.isEmpty())
+        drive.value = connected(speed = 3.0); runCurrent()
+        assertEquals(listOf(destination), engine.destinations)
+        drive.value = connected(speed = 0.0); runCurrent()
+        assertEquals(1, engine.destinations.size)
+        engine.frame(listOf(camera), 0); runCurrent()
+        assertEquals(1, speaker.spoken.size)
+        job.cancelAndJoin()
+    }
+
+    @Test fun parkClearsAudioAndRejectsOldFramesThenNewTripStarts() = runTest {
+        val engine = FakeNavigationEngine()
+        val speaker = FakeSpeaker()
+        val controller = CameraController(engine, speaker) { testScheduler.currentTime }
+        val drive = MutableStateFlow(connected())
+        val job = backgroundScope.launch { controller.run("key", drive) }
+        runCurrent()
+        engine.frame(listOf(camera), 0); runCurrent()
+        val oldRevision = engine.revision
+        drive.value = connected(speed = 0.0, gear = Gear.PARK); runCurrent()
+        assertEquals(CameraPhase.WAITING_DRIVE, controller.state.value.phase)
+        engine.frame(listOf(camera), 0, oldRevision); runCurrent()
+        assertTrue(controller.state.value.cameras.isEmpty())
+        assertEquals(1, speaker.spoken.size)
+        drive.value = connected(speed = null); runCurrent()
+        assertEquals(1, engine.destinations.size)
+        drive.value = connected(); runCurrent()
+        engine.frame(listOf(camera), 0); runCurrent()
+        assertEquals(2, speaker.spoken.size)
+        assertEquals(1, engine.keys.size)
+        job.cancelAndJoin()
+    }
+
+    @Test fun parkingDuringSdkInitializationCancelsRouteStart() = runTest {
+        val ready = CompletableDeferred<Unit>()
+        val engine = FakeNavigationEngine().apply { initializationGate = ready }
+        val controller = CameraController(engine, FakeSpeaker()) { testScheduler.currentTime }
+        val drive = MutableStateFlow(connected())
+        val job = backgroundScope.launch { controller.run("key", drive) }
+        runCurrent()
+        assertEquals(CameraPhase.INITIALIZING, controller.state.value.phase)
+        drive.value = connected(speed = 0.0, gear = Gear.PARK); runCurrent()
+        ready.complete(Unit); runCurrent()
+        assertEquals(CameraPhase.WAITING_DRIVE, controller.state.value.phase)
+        assertTrue(engine.destinations.isEmpty())
+        drive.value = connected(); runCurrent()
+        assertEquals(listOf(destination), engine.destinations)
+        job.cancelAndJoin()
+    }
+
+    @Test fun missingKeyNeverInitializesSdk() = runTest {
+        val engine = FakeNavigationEngine()
+        val controller = CameraController(engine, FakeSpeaker()) { testScheduler.currentTime }
+        controller.run("", MutableStateFlow(connected()))
+        assertEquals(CameraPhase.KEY_REQUIRED, controller.state.value.phase)
+        assertTrue(engine.keys.isEmpty())
+    }
+
+    @Test fun waitsForVehicleAndSwitchesDestinationAndSafetyMode() = runTest {
+        val engine = FakeNavigationEngine()
+        val controller = CameraController(engine, FakeSpeaker()) { testScheduler.currentTime }
+        val drive = MutableStateFlow(DriveState())
+        val job = backgroundScope.launch { controller.run("configured-key", drive) }
+        runCurrent()
+        assertTrue(engine.keys.isEmpty())
+        drive.value = connected()
+        runCurrent()
+        assertEquals(listOf(destination), engine.destinations)
+        drive.value = connected(NavigationDestination.None)
+        runCurrent()
+        assertEquals(NavigationDestination.None, engine.destinations.last())
+        assertEquals(NavigationMode.SAFETY, controller.state.value.mode)
+        job.cancelAndJoin()
+    }
+
+    @Test fun destinationChangeDropsAlreadyQueuedEventsFromPreviousRoute() = runTest {
+        val engine = FakeNavigationEngine()
+        val speaker = FakeSpeaker()
+        val controller = CameraController(engine, speaker) { testScheduler.currentTime }
+        val drive = MutableStateFlow(connected())
+        val job = backgroundScope.launch { controller.run("key", drive) }
+        runCurrent()
+        engine.frame(listOf(camera), testScheduler.currentTime); runCurrent()
+        assertEquals(1, controller.state.value.cameras.size)
+        val oldRevision = engine.revision
+        drive.value = connected(NavigationDestination.Active("부산역", GeoPoint(35.115, 129.042)))
+        runCurrent()
+        assertTrue(controller.state.value.cameras.isEmpty())
+        val count = speaker.spoken.size
+        engine.frame(listOf(camera.copy(id = "old-route")), testScheduler.currentTime, oldRevision)
+        runCurrent()
+        assertTrue(controller.state.value.cameras.isEmpty())
+        assertEquals(count, speaker.spoken.size)
+        job.cancelAndJoin()
+    }
+
+    @Test fun staleGpsCannotShowOrSpeakAndWatchdogClearsLastFrame() = runTest {
+        val engine = FakeNavigationEngine()
+        val speaker = FakeSpeaker()
+        val controller = CameraController(engine, speaker) { testScheduler.currentTime }
+        val job = backgroundScope.launch { controller.run("key", MutableStateFlow(connected())) }
+        runCurrent()
+        engine.frame(listOf(camera), -10001); runCurrent()
+        assertTrue(controller.state.value.cameras.isEmpty())
+        assertTrue(speaker.spoken.isEmpty())
+        engine.frame(listOf(camera), testScheduler.currentTime); runCurrent()
+        assertEquals(CameraPhase.GUIDING, controller.state.value.phase)
+        advanceTimeBy(11001); runCurrent()
+        assertTrue(controller.state.value.cameras.isEmpty())
+        assertEquals(CameraPhase.WAITING_GPS, controller.state.value.phase)
+        job.cancelAndJoin()
+    }
+
+    @Test fun disconnectAndVehicleChangeClearCameraAndAudioState() = runTest {
+        val engine = FakeNavigationEngine()
+        val speaker = FakeSpeaker()
+        val controller = CameraController(engine, speaker) { testScheduler.currentTime }
+        val drive = MutableStateFlow(connected())
+        val job = backgroundScope.launch { controller.run("key", drive) }
+        runCurrent()
+        engine.frame(listOf(camera), 0); runCurrent()
+        drive.value = DriveState(vin = "vehicle-a", phase = DrivePhase.RECONNECTING)
+        runCurrent()
+        engine.frame(listOf(camera), 0); runCurrent()
+        assertTrue(controller.state.value.cameras.isEmpty())
+        assertEquals(CameraPhase.WAITING_VEHICLE, controller.state.value.phase)
+        drive.value = connected(vin = "vehicle-b"); runCurrent()
+        engine.frame(listOf(camera), 0); runCurrent()
+        assertEquals(2, speaker.spoken.size)
+        job.cancelAndJoin()
+        assertTrue(speaker.closed)
+        assertTrue(controller.state.value.cameras.isEmpty())
+    }
+
+    @Test fun mutingStopsCurrentAudioAndSuppressesNewAnnouncements() = runTest {
+        val engine = FakeNavigationEngine()
+        val speaker = FakeSpeaker()
+        val controller = CameraController(engine, speaker) { testScheduler.currentTime }
+        val job = backgroundScope.launch { controller.run("key", MutableStateFlow(connected())) }
+        runCurrent()
+        controller.setMuted(true)
+        engine.frame(listOf(camera), 0); runCurrent()
+        assertTrue(speaker.spoken.isEmpty())
+        assertTrue(controller.state.value.cameras.isNotEmpty())
+        controller.setMuted(false)
+        engine.frame(listOf(camera), 0); runCurrent()
+        engine.frame(listOf(camera), 0); runCurrent()
+        assertEquals(1, speaker.spoken.size)
+        job.cancelAndJoin()
+    }
+
+    @Test fun unavailableSpeechKeepsVisualCameraGuidanceWorking() = runTest {
+        val engine = FakeNavigationEngine()
+        val speaker = FakeSpeaker().apply { initializationError = "한국어 음성 데이터 없음" }
+        val controller = CameraController(engine, speaker) { testScheduler.currentTime }
+        val job = backgroundScope.launch { controller.run("key", MutableStateFlow(connected())) }
+        runCurrent()
+        engine.frame(listOf(camera), 0); runCurrent()
+        assertEquals("한국어 음성 데이터 없음", controller.state.value.voiceError)
+        assertEquals(1, controller.state.value.cameras.size)
+        assertTrue(speaker.spoken.isEmpty())
+        job.cancelAndJoin()
+    }
+
+    @Test fun rejectedAudioFocusDoesNotConsumeTheAnnouncement() = runTest {
+        val engine = FakeNavigationEngine()
+        val speaker = FakeSpeaker().apply { acceptsAudio = false }
+        val controller = CameraController(engine, speaker) { testScheduler.currentTime }
+        val job = backgroundScope.launch { controller.run("key", MutableStateFlow(connected())) }
+        runCurrent()
+        engine.frame(listOf(camera), 0); runCurrent()
+        assertTrue(speaker.spoken.isEmpty())
+        speaker.acceptsAudio = true
+        engine.frame(listOf(camera), 0); runCurrent()
+        engine.frame(listOf(camera), 0); runCurrent()
+        assertEquals(1, speaker.spoken.size)
+        job.cancelAndJoin()
+    }
+
+    @Test fun sdkFailureIsVisibleAndDoesNotChangeVehicleConnection() = runTest {
+        val engine = FakeNavigationEngine().apply { initializationError = IllegalStateException("인증 오류") }
+        val controller = CameraController(engine, FakeSpeaker()) { testScheduler.currentTime }
+        val drive = MutableStateFlow(connected())
+        controller.run("key", drive)
+        assertEquals(CameraPhase.ERROR, controller.state.value.phase)
+        assertEquals("인증 오류", controller.state.value.error)
+        assertEquals(DrivePhase.CONNECTED, drive.value.phase)
+    }
+
+    @Test fun repeatedVehiclePollingDoesNotRequestTheSameRouteAgain() = runTest {
+        val engine = FakeNavigationEngine()
+        val controller = CameraController(engine, FakeSpeaker()) { testScheduler.currentTime }
+        val drive = MutableStateFlow(connected())
+        val job = backgroundScope.launch { controller.run("key", drive) }
+        runCurrent()
+        repeat(4) { index ->
+            drive.value = connected().copy(snapshot = DriveSnapshot(destination, index.toDouble(), 30.0 - index, 10.0 - index), updatedAt = index.toLong())
+            runCurrent()
+        }
+        assertEquals(1, engine.destinations.size)
+        job.cancelAndJoin()
+    }
+
+    @Test fun nearestValidCameraIsSelectedWithoutAnnouncingPassedPoints() = runTest {
+        val engine = FakeNavigationEngine()
+        val speaker = FakeSpeaker()
+        val controller = CameraController(engine, speaker) { testScheduler.currentTime }
+        val job = backgroundScope.launch { controller.run("key", MutableStateFlow(connected())) }
+        runCurrent()
+        engine.frame(listOf(camera.copy(id = "passed", distanceMeters = -10),
+            camera.copy(id = "far", distanceMeters = 2000), camera,
+            camera.copy(id = "near", distanceMeters = 100)), 0)
+        runCurrent()
+        assertEquals("near", controller.state.value.cameras.first().id)
+        assertTrue(speaker.spoken.single().contains("100미터"))
+        job.cancelAndJoin()
+    }
+}
+
+private class FakeNavigationEngine : CameraNavigationEngine {
+    override val events = MutableSharedFlow<NavigationUpdate>(extraBufferCapacity = 32)
+    override var revision = 0L
+    val keys = mutableListOf<String>()
+    val destinations = mutableListOf<NavigationDestination>()
+    var initializationError: Exception? = null
+    var initializationGate: Deferred<Unit>? = null
+    override suspend fun initialize(nativeKey: String) { initializationError?.let { throw it }; initializationGate?.await(); keys += nativeKey }
+    override suspend fun guide(destination: NavigationDestination) {
+        revision++
+        destinations += destination
+        val mode = if (destination is NavigationDestination.Active) NavigationMode.ROUTE else NavigationMode.SAFETY
+        events.emit(NavigationUpdate(revision, NavigationEvent.Mode(mode, "test mode")))
+    }
+    override fun pause() { revision++ }
+    fun frame(cameras: List<CameraReading>, locationAt: Long, atRevision: Long = revision,
+        road: RoadClass = RoadClass.UNKNOWN, speed: Int? = 50) {
+        events.tryEmit(NavigationUpdate(atRevision, NavigationEvent.Frame(cameras, speed, locationAt, road)))
+    }
+}
+
+private class FakeSpeaker : CameraSpeaker {
+    val spoken = mutableListOf<String>()
+    var tripStarts = 0
+    var alarm = false
+    override fun setOverSpeedAlert(active: Boolean) { alarm = active }
+    var acceptsAudio = true
+    var closed = false
+    var initializationError: String? = null
+    override suspend fun initialize(): String? = initializationError
+    override fun speak(text: String): Boolean { if (acceptsAudio) { if (text == "주행시작") tripStarts++ else spoken += text }; return acceptsAudio }
+    override fun silence() = Unit
+    override fun close() { closed = true }
+}

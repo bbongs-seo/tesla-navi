@@ -1,0 +1,4 @@
+# Copy to local.properties, then fill in values on your own computer.
+# Keep local.properties out of Git.
+sdk.dir=C:/Users/YOUR_NAME/AppData/Local/Android/Sdk
+kakao.nativeAppKey=

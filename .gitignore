@@ -1,0 +1,36 @@
+.gradle/
+**/build/
+local.properties
+.idea/
+*.iml
+.reference/
+*.jks
+*.keystore
+captures/
+
+# Local credentials and signing material
+.env
+.env.*
+!.env.example
+!.env.sample
+secrets.properties
+signing.properties
+credentials/
+secrets/
+*.p12
+*.pfx
+*.key
+private*.pem
+*-private*.pem
+
+# Built apps contain the configured API key
+*.apk
+*.aab
+*.apks
+
+# Device diagnostics and private captures
+*.log
+*.hprof
+diagnostics/
+device-logs/
+connection-history*

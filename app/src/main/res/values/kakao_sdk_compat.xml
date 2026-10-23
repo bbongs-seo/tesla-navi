@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Same output as KNSDK 1.12.8-hotfix03; positional placeholders satisfy Android resource validation. -->
+    <string name="kakao_common_header_text" translatable="false">sdk/2.10.0 sdk_type/kotlin os/android-%1$s lang/%2$s-%3$s origin/%4$s device/%5$s appPkg/%6$s app_ver/%7$s navisdk/%8$s</string>
+</resources>
