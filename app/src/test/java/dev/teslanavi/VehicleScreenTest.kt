@@ -6,6 +6,7 @@ import androidx.compose.ui.semantics.SemanticsActions
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import androidx.test.core.app.ApplicationProvider
+import dev.teslanavi.data.FeatureSettings
 import dev.teslanavi.data.VehicleStore
 import org.junit.Rule
 import org.junit.Test
@@ -20,6 +21,37 @@ import java.io.File
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 class VehicleScreenTest {
     @get:Rule val compose = createAndroidComposeRule<MainActivity>()
+
+    @Test fun settingsButtonTurnsOnSettingsTabAndMovesVehicleControls() {
+        compose.onNodeWithContentDescription("메인").assertDoesNotExist()
+        compose.onNodeWithText("첫 차량을 등록해 주세요").assertIsDisplayed()
+        compose.onNodeWithContentDescription("설정 열기").performClick()
+        compose.onNodeWithContentDescription("하단 설정 탭").assertIsOff().performClick()
+        compose.onNodeWithText("닫기").performClick()
+        compose.onNodeWithContentDescription("설정 열기").assertDoesNotExist()
+        compose.onNodeWithContentDescription("메인").assertIsSelected()
+        compose.onNodeWithText("첫 차량을 등록해 주세요").assertDoesNotExist()
+        compose.onNodeWithText("안내 설정").assertDoesNotExist()
+        compose.onNodeWithText("차량을 등록해 주세요").assertIsDisplayed()
+        saveScreenshot("settings-tab-main")
+        compose.onNodeWithText("설정에서 차량 등록").performClick()
+        compose.onNodeWithContentDescription("설정").assertIsSelected()
+        compose.onNodeWithText("첫 차량을 등록해 주세요").assertIsDisplayed()
+        saveScreenshot("settings-tab")
+        compose.runOnUiThread { compose.activity.onBackPressedDispatcher.onBackPressed() }
+        compose.onNodeWithContentDescription("메인").assertIsSelected()
+        org.junit.Assert.assertTrue(FeatureSettings(ApplicationProvider.getApplicationContext()).settingsTab.value)
+    }
+
+    @Test fun turningSettingsTabOffRestoresMainControlsAndSettingsButton() {
+        compose.runOnIdle { ApplicationProvider.getApplicationContext<TeslaNaviApp>().features.setSettingsTab(true) }
+        compose.onNodeWithContentDescription("설정").performClick()
+        compose.onNodeWithContentDescription("하단 설정 탭").assertIsOn().performClick()
+        compose.onNodeWithContentDescription("메인").assertDoesNotExist()
+        compose.onNodeWithContentDescription("설정 열기").assertIsDisplayed()
+        compose.onNodeWithText("첫 차량을 등록해 주세요").assertIsDisplayed()
+        compose.onNodeWithText("안내 설정").assertIsDisplayed()
+    }
 
     @Test fun soundChecksAreAvailableWithoutVehicleAndExplainZeroVolume() {
         compose.onNodeWithText("안내 설정").performClick()

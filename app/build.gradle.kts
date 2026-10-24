@@ -16,8 +16,8 @@ android {
         applicationId = "dev.teslanavi"
         minSdk = 26
         targetSdk = 34
-        versionCode = 16
-        versionName = "0.4.6"
+        versionCode = 17
+        versionName = "0.5.0"
         buildConfigField("String", "KAKAO_NATIVE_APP_KEY", "\"$kakaoNativeAppKey\"")
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

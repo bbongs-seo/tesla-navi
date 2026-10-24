@@ -1,6 +1,7 @@
 package dev.teslanavi
 
 import android.app.Application
+import dev.teslanavi.data.FeatureSettings
 import dev.teslanavi.data.VehicleKeyStore
 import dev.teslanavi.data.VehicleStore
 import dev.teslanavi.drive.DriveController
@@ -14,6 +15,7 @@ class TeslaNaviApp : Application() {
     val autoConnect by lazy { AutoConnectSettings(this) }
     val kakao by lazy { KakaoSettings(this) }
     val guidance by lazy { GuidanceSettings(this) }
+    val features by lazy { FeatureSettings(this) }
     val cameras by lazy {
         CameraController(KakaoNavigationEngine(this, kakao), AndroidCameraSpeaker(this), guidance.options, android.os.SystemClock::elapsedRealtime)
             .also { it.configured(kakao.hasKey.value) }
