@@ -83,9 +83,9 @@ class TeslaClient(private val vin: String, private val keys: KeyPair, private va
      * Null when the vehicle answers without charge_state. Never renews the session: a session
      * fault is left to the next drive read so this optional read cannot reset the connection.
      */
-    suspend fun readChargeState(timeoutMs: Long = 4000): BatterySnapshot? = mutex.withLock {
+    suspend fun readChargeState(timeoutMs: Long = 4000): ChargeSnapshot? = mutex.withLock {
         val response = vehicleData(GetVehicleData.newBuilder().setGetChargeState(GetChargeState.getDefaultInstance()), timeoutMs, renewSession = false)
-        if (response.hasVehicleData() && response.vehicleData.hasChargeState()) BatterySnapshot.from(response.vehicleData.chargeState) else null
+        if (response.hasVehicleData() && response.vehicleData.hasChargeState()) ChargeSnapshot.from(response.vehicleData.chargeState) else null
     }
 
     private suspend fun vehicleData(query: GetVehicleData.Builder, timeoutMs: Long, renewSession: Boolean): Response {

@@ -21,6 +21,18 @@ class BatteryPollTest {
         assertNull("same outcome is not logged again", poll.received(battery.copy(levelPercent = 77), 301_000))
     }
 
+    @Test fun pluggedInRecheckOnlyPullsTheNextReadForward() {
+        val poll = BatteryPoll()
+        poll.received(battery, 1_000)
+        poll.recheckBy(1_000 + BatteryPoll.PLUGGED_RECHECK)
+        assertFalse(poll.due(60_999))
+        assertTrue(poll.due(61_000))
+        poll.received(battery, 61_000)
+        poll.recheckBy(61_000 + 900_000)
+        assertFalse("a later recheck never delays the regular read", poll.due(360_999))
+        assertTrue(poll.due(361_000))
+    }
+
     @Test fun repeatedMissesBackOffAndOnlyOutcomeChangesAreLogged() {
         val poll = BatteryPoll()
         assertEquals("충전 상태 없음 · 차량 응답에 ChargeState가 없습니다", poll.received(null, 0))

@@ -1,6 +1,7 @@
 package dev.teslanavi.protocol
 
 import com.tesla.generated.carserver.common.LatLong
+import com.tesla.generated.carserver.common.Void
 import com.tesla.generated.carserver.server.ActionStatus
 import com.tesla.generated.carserver.server.OperationStatus_E
 import com.tesla.generated.carserver.server.Response
@@ -196,6 +197,29 @@ class ProtocolTest {
         assertEquals(listOf(11, 12, 13), vehicle.counters)
     }
 
+    @Test fun `odometer converts hundredths of a mile to kilometers and stays optional`() {
+        assertEquals(16093.44, DriveSnapshot.from(DriveState.newBuilder().setOdometerInHundredthsOfAMile(1_000_000).build()).odometerKm!!, 0.0001)
+        assertNull(DriveSnapshot.from(DriveState.getDefaultInstance()).odometerKm)
+        assertNull(DriveSnapshot.from(DriveState.newBuilder().setOdometerInHundredthsOfAMile(-1).build()).odometerKm)
+    }
+
+    @Test fun `charge state maps plug status and energy alongside the battery figures`() {
+        val void = Void.getDefaultInstance()
+        val unplugged = ChargeState.newBuilder().setChargingState(ChargeState.ChargingState.newBuilder().setDisconnected(void))
+            .setChargeEnergyAdded(31.4f).setBatteryLevel(80).setBatteryRange(200f).build()
+        val parsed = ChargeSnapshot.from(unplugged)
+        assertEquals(ChargingStatus.DISCONNECTED, parsed.status)
+        assertEquals(31.4, parsed.energyAddedKwh!!, 0.001)
+        assertEquals(80, parsed.batteryLevel)
+        assertEquals(BatterySnapshot.from(unplugged), parsed.battery)
+        assertEquals(ChargingStatus.CHARGING, ChargeSnapshot.from(ChargeState.newBuilder()
+            .setChargingState(ChargeState.ChargingState.newBuilder().setCharging(void)).build()).status)
+        assertEquals(ChargingStatus.COMPLETE, ChargeSnapshot.from(ChargeState.newBuilder()
+            .setChargingState(ChargeState.ChargingState.newBuilder().setComplete(void)).build()).status)
+        assertEquals(ChargeSnapshot(ChargingStatus.UNKNOWN, null), ChargeSnapshot.from(ChargeState.getDefaultInstance()))
+        assertNull(ChargeSnapshot.from(ChargeState.newBuilder().setChargeEnergyAdded(-1f).build()).energyAddedKwh)
+    }
+
     @Test fun `bad handshake signature or another VIN is rejected`() = runTest {
         val keys = TeslaKeys.generate()
         val vehicle = FakeVehicle(keys).apply { corruptHandshake = true }
@@ -258,7 +282,7 @@ class ProtocolTest {
         val client = TeslaClient(VIN, keys, vehicle)
         client.authenticate()
         vehicle.chargeState = ChargeState.newBuilder().setBatteryLevel(64).setBatteryRange(150f).build()
-        assertEquals(BatterySnapshot(64, 150 * 1.609344), client.readChargeState())
+        assertEquals(BatterySnapshot(64, 150 * 1.609344), client.readChargeState()!!.battery)
         vehicle.chargeState = null
         assertNull(client.readChargeState())
         vehicle.chargeRefusal = "권한 없음"

@@ -7,12 +7,14 @@ import dev.teslanavi.ble.AndroidBleTransport
 import dev.teslanavi.data.BatteryStore
 import dev.teslanavi.data.VehicleKeyStore
 import dev.teslanavi.data.VehicleProfile
+import dev.teslanavi.logbook.ChargeDetection
 import dev.teslanavi.protocol.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import java.util.Locale
 
 private class EnrollmentApprovalTimeout : IllegalStateException("키 등록 승인을 확인하지 못했습니다. 차량의 키 목록과 키 카드 승인을 확인해 주세요.")
 
@@ -112,9 +114,10 @@ class DriveController(private val context: Context, private val keyStore: Vehicl
                     client.authenticate()
                 }
                 status("목적지 확인 중", DrivePhase.CONNECTED)
-                (context.applicationContext as TeslaNaviApp).autoConnect.verified(profile.vin)
+                app.autoConnect.verified(profile.vin)
                 var missedReads = 0
                 val batteryPoll = BatteryPoll()
+                lastChargeNote = null
                 while (currentCoroutineContext().isActive) {
                     val snapshot = try {
                         client.readDriveState().also { missedReads = 0 }
@@ -134,13 +137,13 @@ class DriveController(private val context: Context, private val keyStore: Vehicl
                         is NavigationDestination.Active -> "차량 목적지를 확인했습니다"
                     })
                     failures = 0
-                    if (batteryPoll.due(polledAt)) readBattery(client, profile.vin, batteryPoll)
+                    if (batteryPoll.due(polledAt)) readBattery(client, profile.vin, batteryPoll, snapshot.odometerKm)
                     // The 4s battery read fits inside the 5s drive cadence instead of delaying the next drive read.
                     withTimeoutOrNull((polledAt + 5000 - android.os.SystemClock.elapsedRealtime()).coerceAtLeast(1)) { refresh.receive() }
                 }
             } catch (error: Exception) {
                 if (error is CancellationException && error !is TimeoutCancellationException) throw error
-                if (error is KeyNotRegisteredException) (context.applicationContext as TeslaNaviApp).autoConnect.forgetVerification(profile.vin)
+                if (error is KeyNotRegisteredException) app.autoConnect.forgetVerification(profile.vin)
                 val terminal = error is KeyNotRegisteredException || error is EnrollmentApprovalTimeout || error is EnrollmentRejectedException || error is SecurityException ||
                     (error is VehicleFault && error.code !in setOf(1, 2, 11)) ||
                     error is IllegalArgumentException || error is java.security.GeneralSecurityException
@@ -154,17 +157,45 @@ class DriveController(private val context: Context, private val keyStore: Vehicl
         }
     }
 
+    private val app get() = context.applicationContext as TeslaNaviApp
+    private var lastChargeNote: String? = null
+
     /** Never throws except for cancellation: a missing or failed battery read must not end the drive session. */
-    private suspend fun readBattery(client: TeslaClient, vin: String, poll: BatteryPoll) {
+    private suspend fun readBattery(client: TeslaClient, vin: String, poll: BatteryPoll, odometerKm: Double?) {
         val line = try {
-            val battery = client.readChargeState()
-            if (battery != null) recordBattery(vin, battery)
-            poll.received(battery, android.os.SystemClock.elapsedRealtime())
+            val charge = client.readChargeState()
+            if (charge != null) recordBattery(vin, charge.battery)
+            val now = android.os.SystemClock.elapsedRealtime()
+            poll.received(charge?.battery, now).also {
+                if (charge != null && app.features.logbook.value) recordCharge(vin, charge, odometerKm, poll, now)
+            }
         } catch (error: Exception) {
             if (error is CancellationException && error !is TimeoutCancellationException) throw error
             currentCoroutineContext().ensureActive()
             poll.failed(error, android.os.SystemClock.elapsedRealtime())
         }
         line?.let { note(it) }
+    }
+
+    /** The battery read feeds the logbook too; while a cable is in, read again soon so the unplug odometer is accurate. */
+    private fun recordCharge(vin: String, charge: ChargeSnapshot, odometerKm: Double?, poll: BatteryPoll, now: Long) {
+        val message = try {
+            val detection = app.logbook.observe(vin, charge, odometerKm)
+            if (detection == ChargeDetection.PluggedIn) poll.recheckBy(now + BatteryPoll.PLUGGED_RECHECK)
+            when (detection) {
+                ChargeDetection.PluggedIn -> "차계부 · 충전 케이블 연결됨 · 분리 후 기록"
+                ChargeDetection.MissingEnergy -> "차계부 · 차량이 충전량을 제공하지 않음"
+                ChargeDetection.Baseline -> "차계부 · 마지막 충전량을 기준으로 저장"
+                ChargeDetection.Unchanged -> "차계부 · 새 충전 없음"
+                ChargeDetection.MissingOdometer -> "차계부 · 주행거리 정보가 없어 기록 대기"
+                ChargeDetection.AlreadyLogged -> "차계부 · 같은 주행거리의 충전 기록이 있어 건너뜀"
+                is ChargeDetection.NewCharge -> String.format(Locale.KOREA, "차계부 · 충전 기록 추가 %.1f kWh · %,.0f km",
+                    detection.energyKwh, detection.odometerKm)
+            }
+        } catch (error: Exception) {
+            "차계부 기록 실패 · ${error.message?.take(160) ?: error.javaClass.simpleName}"
+        }
+        if (message != lastChargeNote) note(message)
+        lastChargeNote = message
     }
 }

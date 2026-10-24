@@ -37,7 +37,8 @@ class VehicleScreenTest {
         saveScreenshot("settings-tab-main")
         compose.onNodeWithText("설정에서 차량 등록").performClick()
         compose.onNodeWithContentDescription("설정").assertIsSelected()
-        compose.onNodeWithText("첫 차량을 등록해 주세요").assertIsDisplayed()
+        // The feature card above now holds two switches, so the vehicle list may start below the fold.
+        compose.onNodeWithText("첫 차량을 등록해 주세요").performScrollTo().assertIsDisplayed()
         saveScreenshot("settings-tab")
         compose.runOnUiThread { compose.activity.onBackPressedDispatcher.onBackPressed() }
         compose.onNodeWithContentDescription("메인").assertIsSelected()
@@ -78,6 +79,135 @@ class VehicleScreenTest {
         compose.onNodeWithText("일반도로 600 m 전").performScrollTo().assertIsDisplayed()
         compose.onNodeWithText("기본값 복원").performScrollTo().performClick()
         compose.onNodeWithText("고속도로 500 m 전").performScrollTo().assertIsDisplayed()
+    }
+
+    @Test fun logbookTabAppearsOnlyWhenEnabledAndShowsEfficiencyAndCostPerKm() {
+        ApplicationProvider.getApplicationContext<TeslaNaviApp>().vehicles.add("Model Y", "5YJYGDEE1NF123456")
+        compose.onNodeWithContentDescription("차계부").assertDoesNotExist()
+        compose.onNodeWithContentDescription("메인").assertDoesNotExist()
+        openLogbook()
+        // Logbook without the settings tab: two icons, and the logbook header keeps the settings button.
+        compose.onNodeWithContentDescription("차계부").assertIsSelected()
+        compose.onNodeWithContentDescription("메인").assertIsNotSelected()
+        compose.onNodeWithContentDescription("설정").assertDoesNotExist()
+        compose.onNodeWithContentDescription("설정 열기").assertIsDisplayed()
+        compose.onNodeWithText("첫 충전을 기록해 주세요").assertIsDisplayed()
+        addCharge("10000", "40")
+        compose.onNodeWithText("다음 충전을 기록하면 전비를 계산합니다").assertIsDisplayed()
+        addCharge("10228", "30")
+        compose.onAllNodesWithText("7.6").assertCountEquals(2)
+        compose.onNodeWithText("38.8").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("원/km").assertIsDisplayed()
+        compose.onNodeWithText("주행 228 km · 충전 30.0 kWh").performScrollTo().assertIsDisplayed()
+        saveScreenshot("logbook")
+        compose.onNodeWithText("충전 단가 295원/kWh 기준").performScrollTo().assertIsDisplayed()
+        val month = java.time.YearMonth.now()
+        compose.onNodeWithText("${month.year}년 ${month.monthValue}월").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("2회 · 70.0 kWh · 약 20,650원").assertIsDisplayed()
+        compose.onNodeWithText("38.8원/km").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("+228 km").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("10,228 km").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("기준 기록").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("40.0 kWh").performScrollTo().assertIsDisplayed()
+        saveScreenshot("logbook-history")
+        compose.onNodeWithContentDescription("메인").performClick()
+        compose.onNodeWithText("내 차의 목적지").assertIsDisplayed()
+        compose.onNodeWithText("안내 설정").assertIsDisplayed()
+        compose.onNodeWithContentDescription("설정 열기").performClick()
+        compose.onNodeWithContentDescription("차계부 탭").assertIsOn().performClick()
+        compose.onNodeWithText("닫기").performClick()
+        compose.onNodeWithContentDescription("차계부").assertDoesNotExist()
+        compose.onNodeWithContentDescription("메인").assertDoesNotExist()
+        compose.onNodeWithText("내 차의 목적지").assertIsDisplayed()
+    }
+
+    @Test fun logbookAndSettingsTabsShareOneBar() {
+        compose.onNodeWithContentDescription("설정 열기").performClick()
+        compose.onNodeWithContentDescription("하단 설정 탭").performClick()
+        compose.onNodeWithContentDescription("차계부 탭").performClick()
+        compose.onNodeWithText("닫기").performClick()
+        listOf("메인", "차계부", "설정").forEach { compose.onNodeWithContentDescription(it).assertIsDisplayed() }
+        compose.onNodeWithContentDescription("설정 열기").assertDoesNotExist()
+        compose.onNodeWithContentDescription("차계부").performClick()
+        compose.onNodeWithText("차계부").assertIsDisplayed()
+        compose.onNodeWithContentDescription("설정 열기").assertDoesNotExist()
+        saveScreenshot("logbook-three-tabs")
+        compose.onNodeWithContentDescription("설정").performClick()
+        compose.onNodeWithContentDescription("차계부 탭").assertIsOn().performClick()
+        compose.onNodeWithContentDescription("차계부").assertDoesNotExist()
+        compose.onNodeWithContentDescription("설정").assertIsSelected()
+        org.junit.Assert.assertTrue(ApplicationProvider.getApplicationContext<TeslaNaviApp>().features.settingsTab.value)
+    }
+
+    @Test fun rateChangeInLogbookRecalculatesCostPerKm() {
+        val app = ApplicationProvider.getApplicationContext<TeslaNaviApp>()
+        app.vehicles.add("Model Y", "5YJYGDEE1NF123456")
+        app.logbook.add("5YJYGDEE1NF123456", 10_000.0, 40.0)
+        app.logbook.add("5YJYGDEE1NF123456", 10_228.0, 30.0)
+        openLogbook()
+        compose.onNodeWithText("단가 변경").performScrollTo().performClick()
+        compose.onNodeWithText("충전 단가 (원/kWh)").performTextReplacement("347")
+        compose.onNodeWithText("저장").performClick()
+        compose.onNodeWithText("충전 단가 347원/kWh 기준").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("45.7").performScrollTo().assertIsDisplayed()
+        org.junit.Assert.assertEquals(347, app.logbookSettings.wonPerKwh.value)
+    }
+
+    @Test fun chargeInfoOpensInDialogAndMenuDeletesOnlyThatRecord() {
+        val app = ApplicationProvider.getApplicationContext<TeslaNaviApp>()
+        app.vehicles.add("Model Y", "5YJYGDEE1NF123456")
+        app.logbook.add("5YJYGDEE1NF123456", 10_000.0, 40.0)
+        app.logbook.add("5YJYGDEE1NF123456", 10_228.0, 30.0)
+        openLogbook()
+        compose.onNodeWithText("차량이 연결된 동안", substring = true).assertDoesNotExist()
+        compose.onNodeWithContentDescription("충전 기록 안내").performScrollTo().performClick()
+        compose.onNodeWithText("전비는 이전 충전 이후 주행거리를 이번 충전량으로 나눈 값입니다.", substring = true).assertIsDisplayed()
+        compose.onNodeWithText("닫기").performClick()
+        compose.onAllNodesWithContentDescription("충전 기록 메뉴")[0].performScrollTo().performClick()
+        compose.onNodeWithText("기록 삭제").performClick()
+        compose.onNodeWithText("삭제").performClick()
+        compose.onNodeWithText("+228 km").assertDoesNotExist()
+        compose.onNodeWithText("다음 충전을 기록하면 전비를 계산합니다").performScrollTo().assertIsDisplayed()
+        org.junit.Assert.assertEquals(listOf(10_000.0), app.logbook.entries.value["5YJYGDEE1NF123456"]!!.map { it.odometerKm })
+    }
+
+    @Test fun eachVehicleKeepsItsOwnLogbookChosenInsideTheTab() {
+        val app = ApplicationProvider.getApplicationContext<TeslaNaviApp>()
+        app.vehicles.add("Model 3", "5YJ3E1EA1MF111111")
+        app.vehicles.add("Model Y", "5YJYGDEE1NF222222")
+        app.logbook.add("5YJ3E1EA1MF111111", 10_000.0, 40.0)
+        app.logbook.add("5YJ3E1EA1MF111111", 10_228.0, 30.0)
+        openLogbook()
+        compose.onNodeWithText("첫 충전을 기록해 주세요").assertIsDisplayed()
+        compose.onNodeWithText("Model 3 · 111111").performClick()
+        compose.onNodeWithText("38.8").performScrollTo().assertIsDisplayed()
+        saveScreenshot("logbook-vehicles")
+        addCharge("10500", "34")
+        compose.onNodeWithText("Model Y · 222222").performScrollTo().performClick()
+        compose.onNodeWithText("첫 충전을 기록해 주세요").performScrollTo().assertIsDisplayed()
+        org.junit.Assert.assertEquals(3, app.logbook.entries.value["5YJ3E1EA1MF111111"]!!.size)
+        org.junit.Assert.assertNull(app.logbook.entries.value["5YJYGDEE1NF222222"])
+        org.junit.Assert.assertEquals("5YJYGDEE1NF222222", app.vehicles.selected.value)
+    }
+
+    @Test fun logbookAsksForVehicleBeforeRecordingCharges() {
+        openLogbook()
+        compose.onNodeWithText("차량을 먼저 등록해 주세요").assertIsDisplayed()
+        compose.onNodeWithText("+ 충전 기록").assertDoesNotExist()
+    }
+
+    private fun openLogbook() {
+        compose.onNodeWithContentDescription("설정 열기").performClick()
+        compose.onNodeWithContentDescription("차계부 탭").assertIsOff().performClick()
+        compose.onNodeWithText("닫기").performClick()
+        compose.onNodeWithContentDescription("차계부").performClick()
+    }
+
+    private fun addCharge(odometer: String, energy: String) {
+        compose.onNodeWithText("+ 충전 기록").performScrollTo().performClick()
+        compose.onNodeWithText("누적 주행거리 (km)").performTextInput(odometer)
+        compose.onNodeWithText("충전량 (kWh)").performTextInput(energy)
+        compose.onNodeWithText("저장").performClick()
     }
 
     @Test fun firstLaunchShowsRegistrationAndDisabledConnection() {

@@ -36,6 +36,7 @@ data class DriveSnapshot(
     val minutesToArrival: Double?,
     val distanceKm: Double?,
     val gear: Gear = Gear.UNKNOWN,
+    val odometerKm: Double? = null,
 ) {
     companion object {
         fun from(state: DriveState): DriveSnapshot {
@@ -66,6 +67,8 @@ data class DriveSnapshot(
                     ShiftState.TypeCase.D -> Gear.DRIVE
                     else -> Gear.UNKNOWN
                 },
+                if (state.hasOdometerInHundredthsOfAMile())
+                    state.odometerInHundredthsOfAMile.takeIf { it >= 0 }?.let { it / 100.0 * 1.609344 } else null,
             )
         }
     }
@@ -79,6 +82,32 @@ data class BatterySnapshot(val levelPercent: Int?, val rangeKm: Double?) {
         fun from(state: ChargeState) = BatterySnapshot(
             if (state.hasBatteryLevel()) state.batteryLevel.takeIf { it in 0..100 } else null,
             if (state.hasBatteryRange()) state.batteryRange.toDouble().takeIf { it.isFinite() && it in 0.0..1000.0 }?.times(1.609344) else null,
+        )
+    }
+}
+
+enum class ChargingStatus { UNKNOWN, DISCONNECTED, NO_POWER, STARTING, CHARGING, COMPLETE, STOPPED }
+
+/**
+ * One charge_state read shared by the battery card and the logbook. energyAddedKwh is the vehicle's last (or current)
+ * session total; it resets when a new session starts.
+ */
+data class ChargeSnapshot(val status: ChargingStatus, val energyAddedKwh: Double?, val battery: BatterySnapshot = BatterySnapshot(null, null)) {
+    val batteryLevel: Int? get() = battery.levelPercent
+
+    companion object {
+        fun from(state: ChargeState) = ChargeSnapshot(
+            when (state.chargingState.typeCase) {
+                ChargeState.ChargingState.TypeCase.DISCONNECTED -> ChargingStatus.DISCONNECTED
+                ChargeState.ChargingState.TypeCase.NOPOWER -> ChargingStatus.NO_POWER
+                ChargeState.ChargingState.TypeCase.STARTING -> ChargingStatus.STARTING
+                ChargeState.ChargingState.TypeCase.CHARGING -> ChargingStatus.CHARGING
+                ChargeState.ChargingState.TypeCase.COMPLETE -> ChargingStatus.COMPLETE
+                ChargeState.ChargingState.TypeCase.STOPPED -> ChargingStatus.STOPPED
+                else -> ChargingStatus.UNKNOWN
+            },
+            if (state.hasChargeEnergyAdded()) state.chargeEnergyAdded.toDouble().takeIf { it.isFinite() && it >= 0 } else null,
+            BatterySnapshot.from(state),
         )
     }
 }

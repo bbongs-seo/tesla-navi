@@ -16,6 +16,9 @@ class BatteryPoll {
 
     fun due(now: Long) = now >= dueAt
 
+    /** Pulls the next read forward (never later), e.g. while a charge cable is in so the logbook sees the unplug moment. */
+    fun recheckBy(at: Long) { dueAt = minOf(dueAt, at) }
+
     fun received(battery: BatterySnapshot?, now: Long): String? = when {
         battery == null -> miss("충전 상태 없음 · 차량 응답에 ChargeState가 없습니다", now)
         battery.empty -> miss("충전 상태 수신 · 배터리 %·주행 가능 거리 필드 없음", now)
@@ -43,5 +46,6 @@ class BatteryPoll {
     companion object {
         const val INTERVAL = 300_000L
         const val BACKOFF = 600_000L
+        const val PLUGGED_RECHECK = 60_000L
     }
 }
