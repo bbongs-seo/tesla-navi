@@ -63,7 +63,9 @@ class AndroidCameraSpeaker(
         close()
         val systemError = initializeSystemVoice()
         val voice = neural?.takeIf { preferred() == GuidanceVoice.SUPERTONIC } ?: return systemError
+        val loading = SystemClock.elapsedRealtime()
         voice.load()?.let { android.util.Log.w(TAG, "$it 기본 음성으로 안내합니다."); return systemError }
+        android.util.Log.i(TAG, "Supertonic 엔진 준비 ${SystemClock.elapsedRealtime() - loading}ms")
         voice.prefetch("주행시작")
         return null
     }
