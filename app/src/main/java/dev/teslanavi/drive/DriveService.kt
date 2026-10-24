@@ -105,7 +105,8 @@ class DriveService : Service() {
                     cameraSession.cancelAndJoin()
                     keepAwake.cancel(); updates.cancel(); stopForeground(STOP_FOREGROUND_REMOVE); stopSelf()
                     if (automatic && app.drive.state.value.phase == DrivePhase.ERROR && profile.vin in app.autoConnect.verified.value) {
-                        app.autoConnect.report("연결 대기 · 차량이 가까워지면 다시 시도합니다")
+                        app.autoConnect.report(if (app.drive.state.value.asleep) "차량 잠듦 · 깨어나면 연결합니다"
+                            else "연결 대기 · 차량이 가까워지면 다시 시도합니다")
                     }
                     busy = false
                 }

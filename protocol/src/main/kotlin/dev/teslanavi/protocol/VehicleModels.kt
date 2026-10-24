@@ -45,6 +45,9 @@ sealed interface NavigationDestination {
 
 enum class Gear { UNKNOWN, PARK, REVERSE, NEUTRAL, DRIVE }
 
+/** VCSEC's view of the vehicle. Infotainment cannot answer a handshake while ASLEEP. */
+enum class VehicleSleep { AWAKE, ASLEEP, UNKNOWN }
+
 data class DriveSnapshot(
     val destination: NavigationDestination,
     val speedKph: Double?,

@@ -17,6 +17,8 @@ import kotlinx.coroutines.flow.update
 import java.util.Locale
 
 private class EnrollmentApprovalTimeout : IllegalStateException("키 등록 승인을 확인하지 못했습니다. 차량의 키 목록과 키 카드 승인을 확인해 주세요.")
+/** VCSEC reported the vehicle asleep, so the infotainment handshake was not attempted. */
+internal class VehicleAsleepException : IllegalStateException("차량이 잠들어 있어 연결을 미뤘습니다. 차량 문을 열거나 Tesla 앱으로 깨우면 연결합니다.")
 
 enum class DrivePhase { IDLE, CONNECTING, PAIRING, AUTHENTICATING, CONNECTED, RECONNECTING, ERROR }
 data class DriveState(
@@ -29,6 +31,8 @@ data class DriveState(
     val error: String? = null,
     val events: List<String> = emptyList(),
     val automatic: Boolean = false,
+    /** The last attempt ended because VCSEC reported the vehicle asleep. */
+    val asleep: Boolean = false,
 ) {
     val active get() = phase !in setOf(DrivePhase.IDLE, DrivePhase.ERROR)
 }
@@ -43,23 +47,31 @@ class DriveController(private val context: Context, private val keyStore: Vehicl
     private val batteryStore = BatteryStore(context)
     val battery = batteryStore.readings
     private val refresh = Channel<Unit>(Channel.CONFLATED)
+    private val attempts = AttemptLog()
+
+    // Writes through AttemptLog so repeated automatic failures do not crowd out the rest of the history.
+    private fun write(lines: List<String>): List<String> {
+        var events = history.read()
+        lines.forEach { events = history.append(it) }
+        return events
+    }
 
     fun prepare(vin: String, automatic: Boolean = false) {
         _state.value = DriveState(vin, DrivePhase.CONNECTING, "연결 준비 중", automatic = automatic,
-            events = history.append(if (automatic) "자동 연결 준비" else "수동 연결 준비"))
+            events = write(attempts.begin(automatic, if (automatic) "자동 연결 준비" else "수동 연결 준비")))
     }
-    fun clear() { _state.value = DriveState(events = history.read()) }
+    fun clear() { attempts.cancelled(); _state.value = DriveState(events = history.read()) }
     fun requestRefresh() { refresh.trySend(Unit) }
     private fun status(message: String, phase: DrivePhase? = null) {
         android.util.Log.i("TeslaNaviConnection", message)
-        val events = history.append("[${phase ?: _state.value.phase}] $message")
+        val events = write(attempts.line("[${phase ?: _state.value.phase}] $message"))
         _state.update { it.copy(phase = phase ?: it.phase, status = message,
             events = events) }
     }
     /** History-only line; unlike status() it leaves the status text (and notification) alone. */
     private fun note(message: String) {
         android.util.Log.i("TeslaNaviConnection", message)
-        val events = history.append("[${_state.value.phase}] $message")
+        val events = write(attempts.line("[${_state.value.phase}] $message"))
         _state.update { it.copy(events = events) }
     }
     internal fun recordBattery(vin: String, battery: BatterySnapshot, receivedAt: Long = System.currentTimeMillis()) =
@@ -71,8 +83,11 @@ class DriveController(private val context: Context, private val keyStore: Vehicl
             else -> error.message?.take(220) ?: "차량 연결을 완료하지 못했습니다. 다시 시도해 주세요."
         }
         android.util.Log.w("TeslaNaviConnection", "Connection failed: ${error.javaClass.simpleName}: $message")
-        val events = history.append("실패 단계: ${_state.value.phase} · ${error.javaClass.simpleName} · $message")
-        _state.update { it.copy(phase = DrivePhase.ERROR, status = "연결을 확인해 주세요", snapshot = null, updatedAt = null, error = message, events = events) }
+        val outcome = "실패 단계: ${_state.value.phase} · ${error.javaClass.simpleName} · $message"
+        val events = write(attempts.failed(outcome, outcome))
+        val asleep = error is VehicleAsleepException
+        _state.update { it.copy(phase = DrivePhase.ERROR, status = if (asleep) "차량 잠듦 · 깨어나면 연결" else "연결을 확인해 주세요",
+            snapshot = null, updatedAt = null, error = message, events = events, asleep = asleep) }
     }
 
     suspend fun run(profile: VehicleProfile, enroll: Boolean) {
@@ -115,9 +130,13 @@ class DriveController(private val context: Context, private val keyStore: Vehicl
                     }
                     status("앱 키 등록 확인 완료")
                 } else {
+                    // A parked car keeps VCSEC and its advertisement awake while infotainment sleeps; a handshake
+                    // would only time out. No answer leaves the old behaviour (handshake) in place.
+                    if (client.readVehicleSleep() == VehicleSleep.ASLEEP) throw VehicleAsleepException()
                     status("차량 인증 중", DrivePhase.AUTHENTICATING)
                     client.authenticate()
                 }
+                _state.update { it.copy(events = write(attempts.connected())) }
                 status("목적지 확인 중", DrivePhase.CONNECTED)
                 app.autoConnect.verified(profile.vin)
                 var missedReads = 0
@@ -153,13 +172,17 @@ class DriveController(private val context: Context, private val keyStore: Vehicl
                 if (error is CancellationException && error !is TimeoutCancellationException) throw error
                 if (error is KeyNotRegisteredException) app.autoConnect.forgetVerification(profile.vin)
                 val terminal = error is KeyNotRegisteredException || error is EnrollmentApprovalTimeout || error is EnrollmentRejectedException || error is SecurityException ||
-                    (error is VehicleFault && error.code !in setOf(1, 2, 11)) ||
+                    (error is VehicleFault && error.code !in setOf(1, 2, 11)) || error is VehicleAsleepException ||
                     error is IllegalArgumentException || error is java.security.GeneralSecurityException
-                if (terminal || ++failures > 3) throw error
+                // An automatic handshake timeout gets one more try; the proximity scan retries later anyway.
+                val automaticHandshake = _state.value.automatic && _state.value.phase == DrivePhase.AUTHENTICATING &&
+                    error is TimeoutCancellationException
+                val limit = if (automaticHandshake) 1 else 3
+                if (terminal || ++failures > limit) throw error
                 // Clear stale destination immediately; a new connection establishes a new crypto session.
                 _state.update { it.copy(snapshot = null, updatedAt = null) }
                 status(error.message?.take(220) ?: "차량 응답 대기 실패")
-                status("차량 재연결 중 ($failures/3)", DrivePhase.RECONNECTING)
+                status("차량 재연결 중 ($failures/$limit)", DrivePhase.RECONNECTING)
             } finally { client?.close() }
             delay((failures * 2000L).coerceAtMost(6000))
         }

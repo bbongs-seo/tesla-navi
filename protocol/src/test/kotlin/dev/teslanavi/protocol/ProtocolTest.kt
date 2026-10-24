@@ -19,6 +19,9 @@ import com.tesla.generated.vcsec.UnsignedMessage
 import com.tesla.generated.vcsec.FromVCSECMessage
 import com.tesla.generated.vcsec.CommandStatus
 import com.tesla.generated.vcsec.WhitelistOperation_status
+import com.tesla.generated.vcsec.InformationRequestType
+import com.tesla.generated.vcsec.VehicleSleepStatus_E
+import com.tesla.generated.vcsec.VehicleStatus
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.test.runTest
 import java.math.BigInteger
@@ -307,6 +310,34 @@ class ProtocolTest {
         assertEquals("이전 목적지", (client.readDriveState().destination as NavigationDestination.Active).name)
     }
 
+    @Test fun `unauthenticated VCSEC status tells asleep from awake without request uuid`() = runTest {
+        val keys = TeslaKeys.generate()
+        val vehicle = FakeVehicle(keys).apply { sleepStatus = VehicleSleepStatus_E.VEHICLE_SLEEP_STATUS_ASLEEP }
+        val client = TeslaClient(VIN, keys, vehicle)
+        assertEquals(VehicleSleep.ASLEEP, client.readVehicleSleep())
+        vehicle.sleepStatus = VehicleSleepStatus_E.VEHICLE_SLEEP_STATUS_AWAKE
+        assertEquals(VehicleSleep.AWAKE, client.readVehicleSleep())
+        vehicle.sleepStatus = VehicleSleepStatus_E.VEHICLE_SLEEP_STATUS_UNKNOWN
+        assertEquals(VehicleSleep.UNKNOWN, client.readVehicleSleep())
+        // The status check needs no session and leaves the authenticated path untouched.
+        client.authenticate()
+        vehicle.nextState = DriveState.newBuilder().setActiveRouteDestination("서울역").build()
+        assertEquals("서울역", (client.readDriveState().destination as NavigationDestination.Active).name)
+        assertEquals(3, vehicle.statusRequests)
+    }
+
+    @Test fun `silent VCSEC or a reply for another connection gives no sleep answer`() = runTest {
+        val keys = TeslaKeys.generate()
+        val vehicle = FakeVehicle(keys).apply { sleepStatus = null }
+        val client = TeslaClient(VIN, keys, vehicle)
+        assertNull(client.readVehicleSleep(timeoutMs = 1000))
+        vehicle.sleepStatus = VehicleSleepStatus_E.VEHICLE_SLEEP_STATUS_ASLEEP
+        vehicle.vcsecRoutingAddress = ByteArray(16) { 9 }.bytes()
+        assertNull(client.readVehicleSleep(timeoutMs = 1000))
+        // An unanswered status check does not block the handshake that follows.
+        client.authenticate()
+    }
+
     @Test fun `vehicle location is requested with drive state and parsed`() = runTest {
         val keys = TeslaKeys.generate()
         val vehicle = FakeVehicle(keys)
@@ -394,6 +425,10 @@ private class FakeVehicle(private val phone: KeyPair) : VehicleTransport {
     var refuseLocation = false
     val locationRequested = mutableListOf<Boolean>()
     val faults = ArrayDeque<Int>()
+    /** VCSEC's answer to the unauthenticated status request; null means VCSEC stays silent. */
+    var sleepStatus: VehicleSleepStatus_E? = VehicleSleepStatus_E.VEHICLE_SLEEP_STATUS_AWAKE
+    var vcsecRoutingAddress: com.google.protobuf.ByteString? = null
+    var statusRequests = 0
     val queries = mutableListOf<String>()
     var handshakes = 0
     var corruptHandshake = false
@@ -408,6 +443,21 @@ private class FakeVehicle(private val phone: KeyPair) : VehicleTransport {
     override suspend fun send(message: ByteArray) {
         val request = RoutableMessage.parseFrom(message)
         if (!request.hasToDestination()) { rawEnrollment = message; return }
+        if (request.toDestination.domain == Domain.DOMAIN_VEHICLE_SECURITY) {
+            // Unauthenticated status request, answered like VCSEC: no signature and no request_uuid.
+            check(!request.hasSignatureData())
+            check(UnsignedMessage.parseFrom(request.protobufMessageAsBytes).informationRequest.informationRequestType ==
+                InformationRequestType.INFORMATION_REQUEST_TYPE_GET_STATUS)
+            statusRequests++
+            val sleep = sleepStatus ?: return
+            incoming.send(RoutableMessage.newBuilder()
+                .setFromDestination(Destination.newBuilder().setDomain(Domain.DOMAIN_VEHICLE_SECURITY))
+                .setToDestination(Destination.newBuilder().setRoutingAddress(vcsecRoutingAddress ?: request.fromDestination.routingAddress))
+                .setProtobufMessageAsBytes(FromVCSECMessage.newBuilder()
+                    .setVehicleStatus(VehicleStatus.newBuilder().setVehicleSleepStatus(sleep)).build().toByteString())
+                .build().toByteArray())
+            return
+        }
         val reply = RoutableMessage.newBuilder()
             .setFromDestination(Destination.newBuilder().setDomain(Domain.DOMAIN_INFOTAINMENT))
             .setToDestination(request.fromDestination).setRequestUuid(request.uuid)

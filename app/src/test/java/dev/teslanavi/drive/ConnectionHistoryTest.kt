@@ -29,6 +29,25 @@ class ConnectionHistoryTest {
         assertNull(restored.vin)
     }
 
+    @Test fun repeatedAutomaticFailuresNearAParkedCarDoNotFloodTheHistory() {
+        val controller = DriveController(context, VehicleKeyStore(context))
+        val before = ConnectionHistory(context).read().size
+        repeat(20) {
+            controller.prepare("5YJYGDEE1NF123456", automatic = true)
+            controller.fail(VehicleAsleepException())
+        }
+        val written = ConnectionHistory(context).read().drop(before)
+        assertEquals(2, written.size)
+        assertTrue(written[0].endsWith("자동 연결 준비"))
+        assertTrue(written[1].contains("VehicleAsleepException"))
+        val state = controller.state.value
+        assertTrue(state.asleep)
+        assertEquals("차량 잠듦 · 깨어나면 연결", state.status)
+        controller.prepare("5YJYGDEE1NF123456")
+        assertTrue(ConnectionHistory(context).read().any { it.endsWith("이전 자동 연결 결과가 19회 더 반복됨") })
+        assertFalse(controller.state.value.asleep)
+    }
+
     @Test fun diskHistoryIsBoundedAndRedactsVinAcrossReload() {
         val history = ConnectionHistory(context)
         repeat(165) { history.append("기록 $it") }

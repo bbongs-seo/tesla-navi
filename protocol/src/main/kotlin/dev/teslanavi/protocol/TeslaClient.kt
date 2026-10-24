@@ -14,6 +14,7 @@ import com.tesla.generated.universalmessage.Domain
 import com.tesla.generated.universalmessage.RoutableMessage
 import com.tesla.generated.universalmessage.SessionInfoRequest
 import com.tesla.generated.vcsec.*
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.channels.ReceiveChannel
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -65,6 +66,29 @@ class TeslaClient(private val vin: String, private val keys: KeyPair, private va
     }
 
     suspend fun authenticate() = mutex.withLock { handshake() }
+
+    /**
+     * Unauthenticated VCSEC status, the same request as Tesla's body-controller-state. VCSEC answers it
+     * while infotainment sleeps, so it tells whether an infotainment handshake can be answered at all.
+     * Null when VCSEC does not answer in time or reports a fault; callers then proceed as before.
+     */
+    suspend fun readVehicleSleep(timeoutMs: Long = 3000): VehicleSleep? = mutex.withLock {
+        val payload = UnsignedMessage.newBuilder().setInformationRequest(InformationRequest.newBuilder()
+            .setInformationRequestType(InformationRequestType.INFORMATION_REQUEST_TYPE_GET_STATUS)).build()
+        val request = baseMessage(Domain.DOMAIN_VEHICLE_SECURITY).setProtobufMessageAsBytes(payload.toByteString()).build()
+        try {
+            transport.send(request.toByteArray())
+            val reply = awaitReply(request, timeoutMs, Domain.DOMAIN_VEHICLE_SECURITY) { !it.protobufMessageAsBytes.isEmpty }
+            val status = FromVCSECMessage.parseFrom(reply.protobufMessageAsBytes).vehicleStatus
+            when (status.vehicleSleepStatus) {
+                VehicleSleepStatus_E.VEHICLE_SLEEP_STATUS_ASLEEP -> VehicleSleep.ASLEEP
+                VehicleSleepStatus_E.VEHICLE_SLEEP_STATUS_AWAKE -> VehicleSleep.AWAKE
+                else -> VehicleSleep.UNKNOWN
+            }
+        } catch (_: TimeoutCancellationException) { null }
+        catch (_: VehicleFault) { null }
+        catch (_: com.google.protobuf.InvalidProtocolBufferException) { null }
+    }
 
     private suspend fun handshake() {
         session = null
@@ -135,12 +159,12 @@ class TeslaClient(private val vin: String, private val keys: KeyPair, private va
         throw lastError ?: IllegalStateException("차량 상태 조회 실패")
     }
 
-    private fun baseMessage() = RoutableMessage.newBuilder()
-        .setToDestination(Destination.newBuilder().setDomain(Domain.DOMAIN_INFOTAINMENT))
+    private fun baseMessage(domain: Domain = Domain.DOMAIN_INFOTAINMENT) = RoutableMessage.newBuilder()
+        .setToDestination(Destination.newBuilder().setDomain(domain))
         .setFromDestination(Destination.newBuilder().setRoutingAddress(address))
         .setUuid(randomBytes(16).bytes())
 
-    private suspend fun awaitReply(request: RoutableMessage, timeoutMs: Long,
+    private suspend fun awaitReply(request: RoutableMessage, timeoutMs: Long, domain: Domain = Domain.DOMAIN_INFOTAINMENT,
         accept: (RoutableMessage) -> Boolean): RoutableMessage = withTimeout(timeoutMs) {
         while (true) {
             val bytes = transport.incoming.receive()
@@ -156,8 +180,12 @@ class TeslaClient(private val vin: String, private val keys: KeyPair, private va
                 }
                 enrollmentPayload?.let { enrollmentFailure(it)?.let { error -> throw error } }
             }
-            if (response.requestUuid != request.uuid || response.toDestination.routingAddress != address ||
-                response.fromDestination.domain != Domain.DOMAIN_INFOTAINMENT) continue
+            if (response.toDestination.routingAddress != address || response.fromDestination.domain != domain) continue
+            // VCSEC usually leaves request_uuid empty for memory reasons; this connection's routing address
+            // and one request at a time (mutex) identify its reply instead.
+            val sameRequest = response.requestUuid == request.uuid ||
+                (domain == Domain.DOMAIN_VEHICLE_SECURITY && response.requestUuid.isEmpty)
+            if (!sameRequest) continue
             val fault = response.signedMessageStatus.signedMessageFaultValue
             if (fault != 0) throw VehicleFault(fault)
             if (accept(response)) return@withTimeout response
