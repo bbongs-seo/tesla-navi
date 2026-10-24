@@ -43,8 +43,8 @@ android {
         applicationId = "dev.teslanavi"
         minSdk = 26
         targetSdk = 34
-        versionCode = 21
-        versionName = "0.5.4"
+        versionCode = 22
+        versionName = "0.5.5"
         buildConfigField("String", "KAKAO_NATIVE_APP_KEY", "\"$kakaoNativeAppKey\"")
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }

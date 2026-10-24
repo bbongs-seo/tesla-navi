@@ -3,7 +3,6 @@ package dev.teslanavi.drive
 import android.annotation.SuppressLint
 import android.app.*
 import android.bluetooth.BluetoothManager
-import android.bluetooth.le.*
 import android.content.*
 import android.content.pm.ServiceInfo
 import android.location.LocationManager
@@ -20,7 +19,7 @@ import dev.teslanavi.TeslaNaviApp
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 
-/** A user-enabled, visible foreground service owns one filtered low-power scan. */
+/** A user-enabled, visible foreground service owns one filtered low-power [ProximityScan]. */
 @SuppressLint("MissingPermission")
 class AutoConnectService : Service() {
     private val app get() = application as TeslaNaviApp
@@ -40,6 +39,7 @@ class AutoConnectService : Service() {
         }
         if (!app.autoConnect.enabled.value || !AutoConnectSettings.ready(this)) {
             app.autoConnect.report("자동 연결 권한을 확인해 주세요")
+            ProximityScan.disarm(this)
             stopSelf()
             return START_NOT_STICKY
         }
@@ -104,36 +104,13 @@ class AutoConnectService : Service() {
         return START_STICKY
     }
 
+    // Leaving this function stops the scan; a killed process skips the finally block and keeps it.
     private suspend fun scan(names: Set<String>) {
-        val scanner = getSystemService(BluetoothManager::class.java)?.adapter?.bluetoothLeScanner
-            ?: error("Bluetooth 검색 불가")
-        val failed = CompletableDeferred<Unit>()
-        val callback = object : ScanCallback() {
-            override fun onScanResult(callbackType: Int, result: ScanResult) {
-                val name = result.scanRecord?.deviceName
-                if (name !in names) return
-                scope.launch {
-                    if (!app.autoConnect.enabled.value) return@launch
-                    // Recheck eligibility because callbacks from an old scan may still be queued.
-                    app.autoConnect.proximity.update(app.vehicles.vehicles.value.map { it.vin }.toSet(), app.autoConnect.verified.value)
-                    val vin = app.autoConnect.proximity.observe(name, result.rssi, result.isConnectable,
-                        SystemClock.elapsedRealtime(), busy = app.drive.state.value.active || DriveService.busy) ?: return@launch
-                    app.vehicles.select(vin)
-                    app.autoConnect.report("등록 차량을 발견해 연결하고 있습니다")
-                    app.drive.prepare(vin, automatic = true)
-                    try { DriveService.start(this@AutoConnectService, vin, enroll = false, automatic = true) }
-                    catch (error: Exception) { app.drive.fail(error); app.autoConnect.report("앱에서 자동 연결을 다시 켜 주세요") }
-                }
-            }
-            override fun onBatchScanResults(results: MutableList<ScanResult>) { results.forEach { onScanResult(0, it) } }
-            override fun onScanFailed(errorCode: Int) { failed.completeExceptionally(IllegalStateException("BLE 검색 오류 $errorCode")) }
-        }
         try {
             app.autoConnect.report("등록 차량 ${names.size}대 접근 대기 · 먼저 감지된 차량에 연결")
-            scanner.startScan(names.map { ScanFilter.Builder().setDeviceName(it).build() },
-                ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_POWER).build(), callback)
-            failed.await()
-        } finally { failed.cancel(); runCatching { scanner.stopScan(callback) } }
+            ProximityScan.arm(this, names)
+            error("BLE 검색 오류 ${ProximityScan.failures.first()}")
+        } finally { ProximityScan.disarm(this) }
     }
 
     private fun notification(message: String): Notification {
@@ -158,9 +135,24 @@ class AutoConnectService : Service() {
         fun start(context: Context) {
             ContextCompat.startForegroundService(context, Intent(context, AutoConnectService::class.java))
         }
+        /** Called on the main thread for each advertisement that [ProximityScanReceiver] delivers. */
+        fun onAdvertisement(context: Context, name: String?, rssi: Int, connectable: Boolean) {
+            val app = context.applicationContext as TeslaNaviApp
+            if (!app.autoConnect.enabled.value) return
+            // Recheck eligibility because deliveries from an older scan registration may still be queued.
+            app.autoConnect.proximity.update(app.vehicles.vehicles.value.map { it.vin }.toSet(), app.autoConnect.verified.value)
+            val vin = app.autoConnect.proximity.observe(name, rssi, connectable,
+                SystemClock.elapsedRealtime(), busy = app.drive.state.value.active || DriveService.busy) ?: return
+            app.vehicles.select(vin)
+            app.autoConnect.report("등록 차량을 발견해 연결하고 있습니다")
+            app.drive.prepare(vin, automatic = true)
+            try { DriveService.start(context, vin, enroll = false, automatic = true) }
+            catch (error: Exception) { app.drive.fail(error); app.autoConnect.report("앱에서 자동 연결을 다시 켜 주세요") }
+        }
         fun disable(context: Context) {
             val app = context.applicationContext as TeslaNaviApp
             app.autoConnect.setEnabled(false)
+            ProximityScan.disarm(context)
             running = false
             if (app.drive.state.value.active && !app.drive.state.value.automatic) DriveService.notificationOwnerChanged(context)
             context.stopService(Intent(context, AutoConnectService::class.java))

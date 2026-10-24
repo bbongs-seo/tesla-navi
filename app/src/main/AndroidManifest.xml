@@ -37,6 +37,7 @@
         </activity>
         <service android:name=".drive.DriveService" android:foregroundServiceType="connectedDevice|location" android:exported="false" />
         <service android:name=".drive.AutoConnectService" android:foregroundServiceType="connectedDevice|location" android:exported="false" />
+        <receiver android:name=".drive.ProximityScanReceiver" android:exported="false" />
         <receiver android:name=".drive.AutoConnectBootReceiver" android:exported="false">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />

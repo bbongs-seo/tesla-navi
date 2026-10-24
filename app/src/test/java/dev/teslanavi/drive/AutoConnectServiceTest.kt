@@ -6,6 +6,7 @@ import android.app.Service
 import android.content.Intent
 import androidx.test.core.app.ApplicationProvider
 import dev.teslanavi.TeslaNaviApp
+import dev.teslanavi.protocol.VehicleIdentity
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -64,6 +65,31 @@ class AutoConnectServiceTest {
         assertEquals(a, app.vehicles.selected.value)
         assertFalse(app.drive.state.value.active)
         controller.destroy()
+    }
+
+    @Test fun nearbyVerifiedVehicleAdvertisementStartsAutomaticConnection() {
+        val a = "5YJ3E1EA1MF123456"
+        val b = "5YJYGDEE1NF123456"
+        app.vehicles.add("Model 3", a); app.vehicles.add("Model Y", b); app.vehicles.select(a)
+        app.autoConnect.setEnabled(true)
+        app.autoConnect.verified(b)
+        AutoConnectService.onAdvertisement(app, VehicleIdentity.localName(a), -50, true)
+        assertNull(shadowOf(app).nextStartedService)
+        AutoConnectService.onAdvertisement(app, VehicleIdentity.localName(b), -50, true)
+        val started = shadowOf(app).nextStartedService
+        assertEquals(DriveService::class.java.name, started.component!!.className)
+        assertEquals(b, started.getStringExtra("vin"))
+        assertTrue(started.getBooleanExtra("automatic", false))
+        assertEquals(b, app.vehicles.selected.value)
+    }
+
+    @Test fun advertisementIsIgnoredAfterAutomaticConnectionWasTurnedOff() {
+        val b = "5YJYGDEE1NF123456"
+        app.vehicles.add("Model Y", b)
+        app.autoConnect.verified(b)
+        AutoConnectService.onAdvertisement(app, VehicleIdentity.localName(b), -50, true)
+        assertNull(shadowOf(app).nextStartedService)
+        assertFalse(app.drive.state.value.active)
     }
 
     @Test fun missingPermissionsNeverStartForegroundOrVehicleConnection() {
