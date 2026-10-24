@@ -75,9 +75,6 @@ class TeslaClient(private val vin: String, private val keys: KeyPair, private va
 
     suspend fun readDriveState(): DriveSnapshot = mutex.withLock {
         val response = vehicleData(GetVehicleData.newBuilder().setGetDriveState(GetDriveState.getDefaultInstance()), 8000, renewSession = true)
-        check(response.actionStatus.resultValue != 2) {
-            "차량 조회 실패: ${response.actionStatus.resultReason.plainText.ifBlank { "상세 사유 없음" }}"
-        }
         check(response.hasVehicleData() && response.vehicleData.hasDriveState()) { "차량에서 주행 상태를 제공하지 않았습니다." }
         DriveSnapshot.from(response.vehicleData.driveState)
     }
@@ -88,9 +85,6 @@ class TeslaClient(private val vin: String, private val keys: KeyPair, private va
      */
     suspend fun readChargeState(timeoutMs: Long = 4000): BatterySnapshot? = mutex.withLock {
         val response = vehicleData(GetVehicleData.newBuilder().setGetChargeState(GetChargeState.getDefaultInstance()), timeoutMs, renewSession = false)
-        check(response.actionStatus.result != OperationStatus_E.OPERATIONSTATUS_ERROR) {
-            "차량 조회 실패: ${response.actionStatus.resultReason.plainText.ifBlank { "상세 사유 없음" }}"
-        }
         if (response.hasVehicleData() && response.vehicleData.hasChargeState()) BatterySnapshot.from(response.vehicleData.chargeState) else null
     }
 
@@ -104,7 +98,11 @@ class TeslaClient(private val vin: String, private val keys: KeyPair, private va
                     .setProtobufMessageAsBytes(action.toByteString()).build())
                 transport.send(request.message.toByteArray())
                 val reply = awaitReply(request.message, timeoutMs) { !it.protobufMessageAsBytes.isEmpty }
-                return Response.parseFrom(activeSession.decrypt(reply, request.responseId))
+                val response = Response.parseFrom(activeSession.decrypt(reply, request.responseId))
+                check(response.actionStatus.result != OperationStatus_E.OPERATIONSTATUS_ERROR) {
+                    "차량 조회 실패: ${response.actionStatus.resultReason.plainText.ifBlank { "상세 사유 없음" }}"
+                }
+                return response
             } catch (error: VehicleFault) {
                 if (renewSession && attempt == 0 && error.code in setOf(5, 6, 15, 17, 26)) handshake() else throw error
                 lastError = error

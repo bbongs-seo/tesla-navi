@@ -268,6 +268,20 @@ class ProtocolTest {
         assertEquals(listOf("charge", "charge", "charge", "drive"), vehicle.queries)
     }
 
+    @Test fun `drive read reports vehicle error reason even when drive state is attached`() = runTest {
+        val keys = TeslaKeys.generate()
+        val vehicle = FakeVehicle(keys)
+        val client = TeslaClient(VIN, keys, vehicle)
+        client.authenticate()
+        vehicle.nextState = DriveState.newBuilder().setActiveRouteDestination("이전 목적지").build()
+        vehicle.driveRefusal = "차량 절전 중"
+        assertEquals("차량 조회 실패: 차량 절전 중", assertFailsWith<IllegalStateException> { client.readDriveState() }.message)
+        vehicle.driveRefusal = ""
+        assertEquals("차량 조회 실패: 상세 사유 없음", assertFailsWith<IllegalStateException> { client.readDriveState() }.message)
+        vehicle.driveRefusal = null
+        assertEquals("이전 목적지", (client.readDriveState().destination as NavigationDestination.Active).name)
+    }
+
     @Test fun `charge read session fault leaves session renewal to the drive read`() = runTest {
         val keys = TeslaKeys.generate()
         val vehicle = FakeVehicle(keys)
@@ -290,6 +304,7 @@ private class FakeVehicle(private val phone: KeyPair) : VehicleTransport {
     var nextState: DriveState = DriveState.getDefaultInstance()
     var chargeState: ChargeState? = null
     var chargeRefusal: String? = null
+    var driveRefusal: String? = null
     val faults = ArrayDeque<Int>()
     val queries = mutableListOf<String>()
     var handshakes = 0
@@ -336,12 +351,15 @@ private class FakeVehicle(private val phone: KeyPair) : VehicleTransport {
                 incoming.send(reply.setSignedMessageStatus(MessageStatus.newBuilder().setSignedMessageFaultValue(it)).build().toByteArray())
                 return
             }
+            val refusal = if (query.hasGetDriveState()) driveRefusal else chargeRefusal
             val response = Response.newBuilder().apply {
-                if (query.hasGetDriveState()) setVehicleData(VehicleData.newBuilder().setDriveState(nextState))
-                else chargeRefusal?.let {
+                refusal?.let {
                     setActionStatus(ActionStatus.newBuilder().setResult(OperationStatus_E.OPERATIONSTATUS_ERROR)
                         .setResultReason(ResultReason.newBuilder().setPlainText(it)))
-                } ?: setVehicleData(VehicleData.newBuilder().apply { this@FakeVehicle.chargeState?.let { setChargeState(it) } })
+                }
+                // A drive refusal still carries drive state, so the status alone must reject it.
+                if (query.hasGetDriveState()) setVehicleData(VehicleData.newBuilder().setDriveState(nextState))
+                else if (refusal == null) setVehicleData(VehicleData.newBuilder().apply { this@FakeVehicle.chargeState?.let { setChargeState(it) } })
             }.build().toByteArray()
             if (plaintextResponse) reply.setProtobufMessageAsBytes(response.bytes())
             else {
