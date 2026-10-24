@@ -23,6 +23,9 @@ secrets/
 private*.pem
 *-private*.pem
 
+# Third-party binaries fetched and checksum-verified by Gradle
+app/libs/
+
 # Built apps contain the configured API key
 *.apk
 *.aab

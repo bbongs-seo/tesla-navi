@@ -28,6 +28,15 @@ class GuidanceSettingsTest {
         settings.highway(99999); settings.general(99999); settings.volume(-1)
         assertEquals(GuidanceOptions(0, 2000, 1000), GuidanceSettings(context).options.value)
     }
+    @Test fun voiceChoiceSurvivesReloadAndResetButUnknownValuesFallBackToSystem() {
+        val settings = GuidanceSettings(context)
+        settings.voice(GuidanceVoice.SUPERTONIC); settings.volume(40)
+        assertEquals(GuidanceVoice.SUPERTONIC, GuidanceSettings(context).options.value.voice)
+        settings.reset()
+        assertEquals(GuidanceOptions(voice = GuidanceVoice.SUPERTONIC), GuidanceSettings(context).options.value)
+        context.getSharedPreferences("guidance-settings", Context.MODE_PRIVATE).edit().putString("voice", "REMOVED_ENGINE").commit()
+        assertEquals(GuidanceVoice.SYSTEM, GuidanceSettings(context).options.value.voice)
+    }
     @Test fun configuredRangesControlBothCameraPresenceAndOverspeed() {
         val options = GuidanceOptions(highwayMeters = 1200, generalMeters = 600)
         val camera = CameraReading("a", CameraKind.SPEED, 60, 1000)

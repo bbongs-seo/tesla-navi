@@ -66,6 +66,13 @@ class VehicleScreenTest {
         compose.onNodeWithText("안내 음량이 0%입니다. 음량을 올린 뒤 테스트해 주세요.").assertExists()
     }
 
+    @Test fun aiVoiceNeedsTheModelDownloadBeforeItCanBeSelected() {
+        compose.onNodeWithText("안내 설정").performClick()
+        compose.onNode(hasText("휴대폰 기본 음성") and isSelectable()).performScrollTo().assertIsSelected()
+        compose.onNode(hasText("Supertonic 2 AI 음성") and isSelectable()).performScrollTo().assertIsNotEnabled()
+        compose.onNodeWithText("음성 모델 받기 (85MB)").performScrollTo().assertIsEnabled()
+    }
+
     @Test fun guidanceControlsSaveAndReopenAtSelectedValues() {
         compose.onNodeWithText("안내 설정").performClick()
         compose.onNodeWithContentDescription("안내 음량").performSemanticsAction(SemanticsActions.SetProgress) { it(35f) }

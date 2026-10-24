@@ -151,7 +151,7 @@ class MainActivity : ComponentActivity() {
                             onDelete = { id -> profile?.let { app.logbook.delete(it.vin, id) } })
                     }
                 }
-                if (showGuidance) GuidanceSettingsDialog(app.guidance,
+                if (showGuidance) GuidanceSettingsDialog(app,
                     cameras.phase in setOf(CameraPhase.INITIALIZING, CameraPhase.WAITING_GPS, CameraPhase.GUIDING)) { showGuidance = false }
                 if (backgroundDisclosure.value) AlertDialog(
                     onDismissRequest = { backgroundDisclosure.value = false; pendingAutomatic = false },
@@ -877,8 +877,10 @@ private fun VehicleDialog(onDismiss: () -> Unit, onSave: (String, String) -> Uni
 }
 
 @Composable
-private fun GuidanceSettingsDialog(settings: GuidanceSettings, guidanceActive: Boolean, onDismiss: () -> Unit) {
+private fun GuidanceSettingsDialog(app: TeslaNaviApp, guidanceActive: Boolean, onDismiss: () -> Unit) {
+    val settings = app.guidance
     val options by settings.options.collectAsStateWithLifecycle()
+    val model by app.voiceModel.state.collectAsStateWithLifecycle()
     var volume by remember(options.volumePercent) { mutableFloatStateOf(options.volumePercent.toFloat()) }
     var highway by remember(options.highwayMeters) { mutableFloatStateOf(options.highwayMeters.toFloat()) }
     var general by remember(options.generalMeters) { mutableFloatStateOf(options.generalMeters.toFloat()) }
@@ -890,7 +892,9 @@ private fun GuidanceSettingsDialog(settings: GuidanceSettings, guidanceActive: B
                 Slider(value = volume, onValueChange = { volume = it }, onValueChangeFinished = { settings.volume(volume.roundToInt()) },
                     valueRange = 0f..100f, steps = 19, modifier = Modifier.semantics { contentDescription = "안내 음량" })
                 Text("휴대폰 미디어 음량 기준 · 음성과 경고음에 함께 적용", fontSize = 12.sp, color = Muted)
-                GuidanceSoundCheck(volume.roundToInt(), guidanceActive)
+                GuidanceVoiceChoice(options.voice, model, onSelect = app::selectVoice, onDownload = app::downloadVoiceModel,
+                    onCancel = app.voiceModel::cancel, onDelete = app::deleteVoiceModel)
+                GuidanceSoundCheck(volume.roundToInt(), guidanceActive, app::guidanceSpeaker)
                 Text("고속도로 ${highway.roundToInt()} m 전", fontWeight = FontWeight.SemiBold)
                 Slider(value = highway, onValueChange = { highway = it }, onValueChangeFinished = { settings.highway(highway.roundToInt()) },
                     valueRange = 100f..2000f, steps = 18, modifier = Modifier.semantics { contentDescription = "고속도로 안내 거리" })

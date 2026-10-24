@@ -7,17 +7,15 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 
 @Composable
-fun GuidanceSoundCheck(volumePercent: Int, guidanceActive: Boolean) {
-    val context = LocalContext.current.applicationContext
+fun GuidanceSoundCheck(volumePercent: Int, guidanceActive: Boolean, createSpeaker: () -> CameraSpeaker) {
     val scope = rememberCoroutineScope()
-    val preview = remember(scope, context) { GuidanceAudioPreview(scope) { AndroidCameraSpeaker(context) } }
+    val preview = remember(scope) { GuidanceAudioPreview(scope, createSpeaker) }
     val state by preview.state.collectAsStateWithLifecycle()
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     LaunchedEffect(volumePercent) { preview.setVolume(volumePercent) }
