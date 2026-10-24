@@ -3,6 +3,7 @@ package dev.teslanavi.protocol
 import com.tesla.generated.carserver.server.Action
 import com.tesla.generated.carserver.server.GetChargeState
 import com.tesla.generated.carserver.server.GetDriveState
+import com.tesla.generated.carserver.server.GetLocationState
 import com.tesla.generated.carserver.server.GetVehicleData
 import com.tesla.generated.carserver.server.OperationStatus_E
 import com.tesla.generated.carserver.server.Response
@@ -33,6 +34,12 @@ class VehicleFault(val code: Int) : Exception(when (code) {
     21 -> "차량 설정에서 모바일 액세스를 켜 주세요."
     else -> "차량 인증 또는 조회 오류 (코드 $code). 다시 연결해 주세요."
 })
+
+/** The vehicle answered the request but refused it in the action status. */
+private class VehicleDataRejected(message: String) : IllegalStateException(message)
+
+private val SESSION_FAULTS = setOf(5, 6, 15, 17, 26)
+private val BUSY_FAULTS = setOf(1, 2, 11)
 
 /** One serialized request at a time; no unrelated or unauthenticated response becomes vehicle data. */
 class TeslaClient(private val vin: String, private val keys: KeyPair, private val transport: VehicleTransport) {
@@ -73,11 +80,29 @@ class TeslaClient(private val vin: String, private val keys: KeyPair, private va
         enrollmentPending = false
     }
 
+    /** Why the vehicle refused LocationState on this connection; later reads then ask for drive state only. */
+    @Volatile var locationRejection: String? = null
+        private set
+
     suspend fun readDriveState(): DriveSnapshot = mutex.withLock {
-        val response = vehicleData(GetVehicleData.newBuilder().setGetDriveState(GetDriveState.getDefaultInstance()), 8000, renewSession = true)
+        val withLocation = locationRejection == null
+        val response = try { vehicleData(driveQuery(withLocation), 8000, renewSession = true) }
+        catch (error: Exception) {
+            // A refused location request must not cost the drive state the vehicle already provides.
+            // Session and busy faults are retried as before and do not count as a refusal.
+            val refused = error is VehicleDataRejected ||
+                (error is VehicleFault && error.code !in SESSION_FAULTS && error.code !in BUSY_FAULTS)
+            if (!withLocation || !refused) throw error
+            vehicleData(driveQuery(withLocation = false), 8000, renewSession = true)
+                .also { locationRejection = error.message ?: "상세 사유 없음" }
+        }
         check(response.hasVehicleData() && response.vehicleData.hasDriveState()) { "차량에서 주행 상태를 제공하지 않았습니다." }
-        DriveSnapshot.from(response.vehicleData.driveState)
+        val data = response.vehicleData
+        DriveSnapshot.from(data.driveState, if (data.hasLocationState()) data.locationState else null)
     }
+
+    private fun driveQuery(withLocation: Boolean) = GetVehicleData.newBuilder().setGetDriveState(GetDriveState.getDefaultInstance())
+        .apply { if (withLocation) setGetLocationState(GetLocationState.getDefaultInstance()) }
 
     /**
      * Null when the vehicle answers without charge_state. Never renews the session: a session
@@ -99,12 +124,11 @@ class TeslaClient(private val vin: String, private val keys: KeyPair, private va
                 transport.send(request.message.toByteArray())
                 val reply = awaitReply(request.message, timeoutMs) { !it.protobufMessageAsBytes.isEmpty }
                 val response = Response.parseFrom(activeSession.decrypt(reply, request.responseId))
-                check(response.actionStatus.result != OperationStatus_E.OPERATIONSTATUS_ERROR) {
-                    "차량 조회 실패: ${response.actionStatus.resultReason.plainText.ifBlank { "상세 사유 없음" }}"
-                }
+                if (response.actionStatus.result == OperationStatus_E.OPERATIONSTATUS_ERROR) throw VehicleDataRejected(
+                    "차량 조회 실패: ${response.actionStatus.resultReason.plainText.ifBlank { "상세 사유 없음" }}")
                 return response
             } catch (error: VehicleFault) {
-                if (renewSession && attempt == 0 && error.code in setOf(5, 6, 15, 17, 26)) handshake() else throw error
+                if (renewSession && attempt == 0 && error.code in SESSION_FAULTS) handshake() else throw error
                 lastError = error
             }
         }

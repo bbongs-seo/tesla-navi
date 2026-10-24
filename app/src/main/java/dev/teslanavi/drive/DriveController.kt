@@ -123,6 +123,7 @@ class DriveController(private val context: Context, private val keyStore: Vehicl
                 var missedReads = 0
                 val batteryPoll = BatteryPoll()
                 lastChargeNote = null
+                val locationProbe = LocationProbe()
                 while (currentCoroutineContext().isActive) {
                     val snapshot = try {
                         client.readDriveState().also { missedReads = 0 }
@@ -135,6 +136,7 @@ class DriveController(private val context: Context, private val keyStore: Vehicl
                         continue
                     }
                     val polledAt = android.os.SystemClock.elapsedRealtime()
+                    locationProbe.observe(snapshot.location, client.locationRejection, System.currentTimeMillis())?.let(::note)
                     val previous = _state.value.snapshot?.destination
                     _state.update { it.copy(snapshot = snapshot, updatedAt = System.currentTimeMillis(), error = null) }
                     if (previous != snapshot.destination) status(when (snapshot.destination) {

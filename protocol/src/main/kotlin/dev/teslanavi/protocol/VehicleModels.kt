@@ -2,6 +2,7 @@ package dev.teslanavi.protocol
 
 import com.tesla.generated.carserver.vehicle.ChargeState
 import com.tesla.generated.carserver.vehicle.DriveState
+import com.tesla.generated.carserver.vehicle.LocationState
 import com.tesla.generated.carserver.vehicle.ShiftState
 import java.security.MessageDigest
 import java.util.Locale
@@ -23,6 +24,20 @@ data class GeoPoint(val latitude: Double, val longitude: Double) {
     }
 }
 
+/** The vehicle's own GPS from LocationState. A missing or 0,0 coordinate means no usable fix. */
+data class VehicleLocation(val point: GeoPoint?, val headingDegrees: Int?, val gpsAsOf: Long?) {
+    companion object {
+        fun from(state: LocationState): VehicleLocation = VehicleLocation(
+            if (state.hasLatitude() && state.hasLongitude())
+                runCatching { GeoPoint(state.latitude.toDouble(), state.longitude.toDouble()) }.getOrNull()
+                    ?.takeUnless { it.latitude == 0.0 && it.longitude == 0.0 }
+            else null,
+            if (state.hasHeading()) state.heading else null,
+            if (state.hasGpsAsOf()) state.gpsAsOf else null,
+        )
+    }
+}
+
 sealed interface NavigationDestination {
     data object None : NavigationDestination
     data class Active(val name: String?, val point: GeoPoint?) : NavigationDestination
@@ -37,9 +52,11 @@ data class DriveSnapshot(
     val distanceKm: Double?,
     val gear: Gear = Gear.UNKNOWN,
     val odometerKm: Double? = null,
+    /** Null when the response carried no LocationState. */
+    val location: VehicleLocation? = null,
 ) {
     companion object {
-        fun from(state: DriveState): DriveSnapshot {
+        fun from(state: DriveState, location: LocationState? = null): DriveSnapshot {
             val name = state.activeRouteDestination.trim().takeIf { it.isNotEmpty() }
             val point = if (state.hasActiveRouteCoordinates()) {
                 val coords = state.activeRouteCoordinates
@@ -69,6 +86,7 @@ data class DriveSnapshot(
                 },
                 if (state.hasOdometerInHundredthsOfAMile())
                     state.odometerInHundredthsOfAMile.takeIf { it >= 0 }?.let { it / 100.0 * 1.609344 } else null,
+                location?.let(VehicleLocation::from),
             )
         }
     }
