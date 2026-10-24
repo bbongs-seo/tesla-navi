@@ -122,6 +122,11 @@ class CameraController(
                                             speedWarning?.let(overSpeedPolicy::commit)
                                         }
                                     }
+                                    // After speak(), so preparation never queues ahead of a due announcement.
+                                    cameras.forEach { camera ->
+                                        policy.upcoming(camera, road, settings.value)?.let(speaker::prefetch)
+                                        overSpeedPolicy.upcoming(camera, road, settings.value)?.let(speaker::prefetch)
+                                    }
                                 }
                             }
                         }

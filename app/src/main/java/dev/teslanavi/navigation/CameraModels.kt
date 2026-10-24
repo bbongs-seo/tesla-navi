@@ -46,6 +46,7 @@ interface CameraSpeaker {
         if (accepted) onComplete(true)
         return accepted
     }
+    fun prefetch(text: String) {}
     fun setOverSpeedAlert(active: Boolean) {}
     fun setVolume(percent: Int) {}
     fun silence()
@@ -68,7 +69,10 @@ data class CameraState(
     val overSpeedCamera: CameraReading? = null,
 )
 
-/** One presence announcement per camera; commit only after speech completed. */
+/** How far before the alert distance a slow voice may start preparing the announcement. */
+const val PREPARE_METERS = 1000
+
+/** One presence announcement per camera; commit only after audio was accepted. */
 class CameraAlertPolicy {
     data class Announcement(val cameraId: String, val text: String, val atMillis: Long)
     private val announced = linkedMapOf<String, Long>()
@@ -77,10 +81,21 @@ class CameraAlertPolicy {
         if (camera.distanceMeters !in 0..options.distance(roadClass)) return null
         announced.entries.removeAll { nowMillis - it.value > 5 * 60 * 1000 }
         if (camera.id in announced) return null
-        val distance = if (camera.distanceMeters < 50) "잠시 후" else "${((camera.distanceMeters + 50) / 100) * 100}미터 앞"
+        return Announcement(camera.id, text(camera, camera.distanceMeters), nowMillis)
+    }
+
+    /** The text [next] is expected to produce when an approaching camera reaches the alert distance. */
+    fun upcoming(camera: CameraReading, roadClass: RoadClass, options: GuidanceOptions = GuidanceOptions()): String? {
+        val alert = options.distance(roadClass)
+        if (camera.id in announced || camera.distanceMeters !in alert + 1..alert + PREPARE_METERS) return null
+        return text(camera, alert)
+    }
+
+    private fun text(camera: CameraReading, meters: Int): String {
+        val distance = if (meters < 50) "잠시 후" else "${((meters + 50) / 100) * 100}미터 앞"
         val limit = camera.speedLimitKph?.let { " 제한속도 시속 ${it}킬로미터입니다." } ?: ""
         val variable = if (camera.variableLimit) " 가변 제한속도 표지판을 확인해 주세요." else ""
-        return Announcement(camera.id, "$distance ${camera.kind.label} 카메라가 있습니다.$limit$variable", nowMillis)
+        return "$distance ${camera.kind.label} 카메라가 있습니다.$limit$variable"
     }
 
     fun commit(announcement: Announcement) {
@@ -105,8 +120,16 @@ class OverSpeedPolicy {
         if (!isOverSpeed(camera, speedKph, roadClass, options)) { lastSpokenCamera = null; return null }
         val key = "${camera!!.id}:${camera.speedLimitKph}"
         if (lastSpokenCamera == key) return null
-        return Announcement("제한속도 ${camera.speedLimitKph}킬로미터 초과입니다.", nowMillis, key)
+        return Announcement(warning(camera.speedLimitKph!!), nowMillis, key)
     }
+
+    /** The warning this camera can trigger, while it is close enough for a slow voice to prepare. */
+    fun upcoming(camera: CameraReading, roadClass: RoadClass, options: GuidanceOptions = GuidanceOptions()): String? {
+        val limit = camera.speedLimitKph?.takeIf { it > 0 && !camera.variableLimit } ?: return null
+        return if (camera.distanceMeters in 0..options.distance(roadClass) + PREPARE_METERS) warning(limit) else null
+    }
+
+    private fun warning(limit: Int) = "제한속도 ${limit}킬로미터 초과입니다."
 
     fun commit(announcement: Announcement) { lastSpokenCamera = announcement.cameraKey }
     fun clear() { lastSpokenCamera = null }

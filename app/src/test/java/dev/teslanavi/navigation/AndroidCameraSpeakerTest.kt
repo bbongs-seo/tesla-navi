@@ -26,6 +26,60 @@ import java.util.Locale
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], application = TeslaNaviApp::class, shadows = [ControlledSpeech::class])
 class AndroidCameraSpeakerTest {
+    @Test fun neuralCompletionAndFailedSystemFallbackAreReportedAfterPlayback() = runTest {
+        val context = ApplicationProvider.getApplicationContext<TeslaNaviApp>()
+        shadowOf(context.getSystemService(AudioManager::class.java))
+            .setNextFocusRequestResponse(AudioManager.AUDIOFOCUS_REQUEST_GRANTED)
+        ShadowTextToSpeech.addLanguageAvailability(Locale.KOREAN)
+        val voice = FakePcmVoice()
+        val speaker = AndroidCameraSpeaker(context, voice) { GuidanceVoice.SUPERTONIC }
+        val initialization = async(start = CoroutineStart.UNDISPATCHED) { speaker.initialize() }
+        val speech = shadowOf(ShadowTextToSpeech.getLastTextToSpeechInstance()) as ControlledSpeech
+        speech.onInitListener.onInit(TextToSpeech.SUCCESS)
+        assertNull(initialization.await())
+        try {
+            val results = mutableListOf<Boolean>()
+            assertTrue(speaker.speak("카메라 안내") { results += it })
+            shadowOf(Looper.getMainLooper()).idle()
+            assertTrue(results.isEmpty())
+            shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(voice.pcm!!.millis + 1001))
+            assertEquals(listOf(true), results)
+            voice.pcm = null
+            assertTrue(speaker.speak("다음 카메라") { results += it })
+            shadowOf(Looper.getMainLooper()).idle()
+            assertEquals(listOf(true), results)
+            speech.utteranceProgressListener.onError(speech.lastId, TextToSpeech.ERROR_OUTPUT)
+            shadowOf(Looper.getMainLooper()).idle()
+            assertEquals(listOf(true, false), results)
+            assertTrue(speaker.needsInitialization)
+        } finally { speaker.close() }
+    }
+
+    @Test fun stalledNeuralRenderingTimesOutWithoutSilencingChimeOrAcceptingLateAudio() = runTest {
+        val context = ApplicationProvider.getApplicationContext<TeslaNaviApp>()
+        shadowOf(context.getSystemService(AudioManager::class.java))
+            .setNextFocusRequestResponse(AudioManager.AUDIOFOCUS_REQUEST_GRANTED)
+        ShadowTextToSpeech.addLanguageAvailability(Locale.KOREAN)
+        val voice = FakePcmVoice().apply { defer = true }
+        val speaker = AndroidCameraSpeaker(context, voice) { GuidanceVoice.SUPERTONIC }
+        val initialization = async(start = CoroutineStart.UNDISPATCHED) { speaker.initialize() }
+        val speech = shadowOf(ShadowTextToSpeech.getLastTextToSpeechInstance()) as ControlledSpeech
+        speech.onInitListener.onInit(TextToSpeech.SUCCESS)
+        assertNull(initialization.await())
+        try {
+            val results = mutableListOf<Boolean>()
+            speaker.speak("카메라 안내") { results += it }
+            speaker.setOverSpeedAlert(true)
+            shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(12_000))
+            assertEquals(listOf(false), results)
+            assertTrue(speaker.needsInitialization)
+            assertEquals(AudioTrack.PLAYSTATE_PLAYING, checkNotNull(trackOf(speaker)).playState)
+            voice.pending?.invoke(voice.pcm)
+            shadowOf(Looper.getMainLooper()).idle()
+            assertNull(voiceTrackOf(speaker))
+            assertEquals(listOf(false), results)
+        } finally { speaker.close() }
+    }
     @Test fun stoppedSpeechAllowsOverspeedSpeechAndRepeatingChime() = runTest {
         val context = ApplicationProvider.getApplicationContext<TeslaNaviApp>()
         shadowOf(context.getSystemService(AudioManager::class.java))
@@ -87,6 +141,63 @@ class AndroidCameraSpeakerTest {
         } finally { speaker.close() }
     }
 
+    @Test fun selectedNeuralVoicePlaysPcmAndFallsBackToSystemVoiceWhenRenderingFails() = runTest {
+        val context = ApplicationProvider.getApplicationContext<TeslaNaviApp>()
+        shadowOf(context.getSystemService(AudioManager::class.java))
+            .setNextFocusRequestResponse(AudioManager.AUDIOFOCUS_REQUEST_GRANTED)
+        ShadowTextToSpeech.addLanguageAvailability(Locale.KOREAN)
+        val voice = FakePcmVoice()
+        val speaker = AndroidCameraSpeaker(context, voice) { GuidanceVoice.SUPERTONIC }
+        val initialization = async(start = CoroutineStart.UNDISPATCHED) { speaker.initialize() }
+        val speech = shadowOf(ShadowTextToSpeech.getLastTextToSpeechInstance()) as ControlledSpeech
+        speech.onInitListener.onInit(TextToSpeech.SUCCESS)
+        assertNull(initialization.await())
+        assertEquals(listOf("주행시작"), voice.prefetched)
+        try {
+            assertTrue(speaker.speak("300미터 앞 과속 단속 카메라가 있습니다."))
+            shadowOf(Looper.getMainLooper()).idle()
+            val output = checkNotNull(voiceTrackOf(speaker))
+            assertEquals(AudioTrack.PLAYSTATE_PLAYING, output.playState)
+            assertNull("system TTS stays silent", speech.lastId)
+            assertFalse(speaker.speak("겹치는 안내"))
+            speaker.prefetch("제한속도 60킬로미터 초과입니다.")
+            assertEquals("제한속도 60킬로미터 초과입니다.", voice.prefetched.last())
+            shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(voice.pcm!!.millis + 1001))
+            assertNull(voiceTrackOf(speaker))
+            voice.pcm = null
+            assertTrue(speaker.speak("제한속도 60킬로미터 초과입니다."))
+            shadowOf(Looper.getMainLooper()).idle()
+            assertNotNull("fallback used the phone voice", speech.lastId)
+            assertNull(voiceTrackOf(speaker))
+            assertFalse(speaker.speak("겹치는 안내"))
+            speech.utteranceProgressListener.onDone(speech.lastId)
+            shadowOf(Looper.getMainLooper()).idle()
+            shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(2000))
+            assertTrue(speaker.speak("다음 안내"))
+        } finally { speaker.close() }
+    }
+
+    @Test fun systemVoiceSelectionOrUnavailableModelKeepsPhoneVoice() = runTest {
+        val context = ApplicationProvider.getApplicationContext<TeslaNaviApp>()
+        shadowOf(context.getSystemService(AudioManager::class.java))
+            .setNextFocusRequestResponse(AudioManager.AUDIOFOCUS_REQUEST_GRANTED)
+        ShadowTextToSpeech.addLanguageAvailability(Locale.KOREAN)
+        listOf(FakePcmVoice() to GuidanceVoice.SYSTEM,
+            FakePcmVoice(loadError = "Supertonic 음성 모델을 먼저 받아 주세요.") to GuidanceVoice.SUPERTONIC).forEach { (voice, choice) ->
+            val speaker = AndroidCameraSpeaker(context, voice) { choice }
+            val initialization = async(start = CoroutineStart.UNDISPATCHED) { speaker.initialize() }
+            val speech = shadowOf(ShadowTextToSpeech.getLastTextToSpeechInstance()) as ControlledSpeech
+            speech.onInitListener.onInit(TextToSpeech.SUCCESS)
+            assertNull(initialization.await())
+            try {
+                assertTrue(speaker.speak("카메라가 있습니다"))
+                assertNotNull(speech.lastId)
+                assertTrue(voice.rendered.isEmpty())
+                assertNull(voiceTrackOf(speaker))
+            } finally { speaker.close() }
+        }
+    }
+
     @Test fun asynchronousErrorReportsFailureAndReinitializationPreservesChime() = runTest {
         val context = ApplicationProvider.getApplicationContext<TeslaNaviApp>()
         shadowOf(context.getSystemService(AudioManager::class.java))
@@ -145,6 +256,19 @@ class AndroidCameraSpeakerTest {
     }
 
     private fun trackOf(speaker: AndroidCameraSpeaker): AudioTrack? = ReflectionHelpers.getField(speaker, "track")
+    private fun voiceTrackOf(speaker: AndroidCameraSpeaker): AudioTrack? = ReflectionHelpers.getField(speaker, "voiceTrack")
+}
+
+private class FakePcmVoice(private val loadError: String? = null) : PcmVoice {
+    var defer = false
+    var pending: ((Pcm?) -> Unit)? = null
+    var pcm: Pcm? = Pcm(ByteArray(2 * 4_800), 24_000)
+    val rendered = mutableListOf<String>()
+    val prefetched = mutableListOf<String>()
+    override var ready = false
+    override suspend fun load(): String? { ready = loadError == null; return loadError }
+    override fun render(text: String, done: (Pcm?) -> Unit) { rendered += text; if (defer) pending = done else done(pcm) }
+    override fun prefetch(text: String) { prefetched += text }
 }
 
 /** Deliver actual Android TTS callbacks explicitly, including interruption without onDone. */

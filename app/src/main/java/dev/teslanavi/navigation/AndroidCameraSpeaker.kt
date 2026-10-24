@@ -17,12 +17,16 @@ import kotlinx.coroutines.withTimeoutOrNull
 import java.util.Locale
 import java.util.UUID
 
-class AndroidCameraSpeaker(private val context: Context) : CameraSpeaker {
+class AndroidCameraSpeaker(private val context: Context,
+    private val neural: PcmVoice? = null,
+    private val preferred: () -> GuidanceVoice = { GuidanceVoice.SYSTEM },
+) : CameraSpeaker {
     private val audio = context.getSystemService(AudioManager::class.java)
     private val handler = Handler(Looper.getMainLooper())
     private var tts: TextToSpeech? = null
     private var focus: AudioFocusRequest? = null
     private var alarm = false
+    private var voiceTrack: AudioTrack? = null
     private var track: AudioTrack? = null
     private var gain = 1f
     override var needsInitialization = true
@@ -63,6 +67,16 @@ class AndroidCameraSpeaker(private val context: Context) : CameraSpeaker {
         .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build()
 
     override suspend fun initialize(): String? {
+        val systemError = initializeSystemVoice()
+        val voice = neural?.takeIf { preferred() == GuidanceVoice.SUPERTONIC } ?: return systemError
+        val error = voice.load()
+        if (error != null) { record("neural init failed; system fallback"); return systemError }
+        needsInitialization = false
+        voice.prefetch("주행시작")
+        return null
+    }
+
+    private suspend fun initializeSystemVoice(): String? {
         // Rebuilding TTS must not stop the independently playing overspeed chime.
         stopSpeech()
         tts?.shutdown()
@@ -117,6 +131,7 @@ class AndroidCameraSpeaker(private val context: Context) : CameraSpeaker {
     private fun finishCurrent(success: Boolean) {
         handler.removeCallbacks(speechTimeout)
         utterance = null
+        releaseVoiceTrack()
         val callback = completion
         completion = null
         if (!success) retryAfter = SystemClock.elapsedRealtime() + 2000
@@ -127,7 +142,8 @@ class AndroidCameraSpeaker(private val context: Context) : CameraSpeaker {
     override fun speak(text: String): Boolean = speak(text) {}
 
     override fun speak(text: String, onComplete: (Boolean) -> Unit): Boolean {
-        val engine = tts ?: return false
+        val voice = neuralVoice()
+        if (voice == null && tts == null) return false
         if (needsInitialization || utterance != null || gain == 0f || SystemClock.elapsedRealtime() < retryAfter) return false
         track?.pause()
         if (!acquireFocus()) {
@@ -139,18 +155,59 @@ class AndroidCameraSpeaker(private val context: Context) : CameraSpeaker {
         utterance = id
         completion = onComplete
         record("speech requested id=$id gain=$gain musicVolume=${audio.getStreamVolume(AudioManager.STREAM_MUSIC)}")
+        handler.postDelayed(speechTimeout, 10_000)
+        if (voice != null) {
+            voice.render(text) { pcm -> handler.post {
+                if (id != utterance) return@post
+                if (pcm != null && play(pcm, id)) return@post
+                record("neural render failed; system fallback id=$id")
+                speakSystem(text, id)
+            } }
+            return true
+        }
+        return speakSystem(text, id)
+    }
+
+    private fun speakSystem(text: String, id: String): Boolean {
         val result = runCatching {
-            engine.speak(text, TextToSpeech.QUEUE_FLUSH, Bundle().apply { putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, gain) }, id)
-        }.getOrDefault(TextToSpeech.ERROR)
+            tts?.speak(text, TextToSpeech.QUEUE_FLUSH,
+                Bundle().apply { putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, gain) }, id)
+        }.getOrNull()
         if (result != TextToSpeech.SUCCESS) {
             record("speech rejected id=$id result=$result")
             needsInitialization = true
             finishCurrent(false)
             return false
         }
+        handler.removeCallbacks(speechTimeout)
         handler.postDelayed(speechTimeout, 10_000)
         return true
     }
+
+    private fun neuralVoice() = neural?.takeIf { preferred() == GuidanceVoice.SUPERTONIC && it.ready }
+    override fun prefetch(text: String) { neuralVoice()?.prefetch(text) }
+
+    /** Static PCM playback. The marker ends the utterance; a timer covers devices that drop the marker callback. */
+    private fun play(pcm: Pcm, id: String): Boolean = runCatching {
+        releaseVoiceTrack()
+        val output = AudioTrack.Builder().setAudioAttributes(attributes)
+            .setAudioFormat(AudioFormat.Builder().setSampleRate(pcm.sampleRate).setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                .setChannelMask(AudioFormat.CHANNEL_OUT_MONO).build())
+            .setTransferMode(AudioTrack.MODE_STATIC).setBufferSizeInBytes(pcm.bytes.size).build()
+        voiceTrack = output
+        check(output.write(pcm.bytes, 0, pcm.bytes.size) == pcm.bytes.size) { "음성 PCM 데이터 전송 실패" }
+        output.setVolume(gain)
+        output.notificationMarkerPosition = pcm.frames
+        output.setPlaybackPositionUpdateListener(object : AudioTrack.OnPlaybackPositionUpdateListener {
+            override fun onMarkerReached(track: AudioTrack?) = finished(id, true, "neural done")
+            override fun onPeriodicNotification(track: AudioTrack?) = Unit
+        }, handler)
+        handler.removeCallbacks(speechTimeout)
+        handler.postDelayed({ finished(id, true, "neural done") }, pcm.millis + 1000)
+        output.play()
+    }.onFailure { android.util.Log.w("TeslaNaviAudio", "Supertonic 음성 출력 실패", it); releaseVoiceTrack() }.isSuccess
+
+    private fun releaseVoiceTrack() { voiceTrack?.let { runCatching { it.stop() }; it.release() }; voiceTrack = null }
 
     private fun acquireFocus(): Boolean {
         if (focus != null) return true
@@ -169,6 +226,7 @@ class AndroidCameraSpeaker(private val context: Context) : CameraSpeaker {
     override fun setVolume(percent: Int) {
         gain = percent.coerceIn(0, 100) / 100f
         track?.setVolume(gain)
+        voiceTrack?.setVolume(gain)
         if (gain == 0f) silence()
     }
 
@@ -184,6 +242,7 @@ class AndroidCameraSpeaker(private val context: Context) : CameraSpeaker {
     private fun stopSpeech() {
         handler.removeCallbacks(speechTimeout)
         utterance = null
+        releaseVoiceTrack()
         val callback = completion
         completion = null
         tts?.stop()

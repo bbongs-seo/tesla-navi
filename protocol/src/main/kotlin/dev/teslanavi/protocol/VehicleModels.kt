@@ -1,6 +1,8 @@
 package dev.teslanavi.protocol
 
+import com.tesla.generated.carserver.vehicle.ChargeState
 import com.tesla.generated.carserver.vehicle.DriveState
+import com.tesla.generated.carserver.vehicle.LocationState
 import com.tesla.generated.carserver.vehicle.ShiftState
 import java.security.MessageDigest
 import java.util.Locale
@@ -22,6 +24,20 @@ data class GeoPoint(val latitude: Double, val longitude: Double) {
     }
 }
 
+/** The vehicle's own GPS from LocationState. A missing or 0,0 coordinate means no usable fix. */
+data class VehicleLocation(val point: GeoPoint?, val headingDegrees: Int?, val gpsAsOf: Long?) {
+    companion object {
+        fun from(state: LocationState): VehicleLocation = VehicleLocation(
+            if (state.hasLatitude() && state.hasLongitude())
+                runCatching { GeoPoint(state.latitude.toDouble(), state.longitude.toDouble()) }.getOrNull()
+                    ?.takeUnless { it.latitude == 0.0 && it.longitude == 0.0 }
+            else null,
+            if (state.hasHeading()) state.heading else null,
+            if (state.hasGpsAsOf()) state.gpsAsOf else null,
+        )
+    }
+}
+
 sealed interface NavigationDestination {
     data object None : NavigationDestination
     data class Active(val name: String?, val point: GeoPoint?) : NavigationDestination
@@ -29,15 +45,21 @@ sealed interface NavigationDestination {
 
 enum class Gear { UNKNOWN, PARK, REVERSE, NEUTRAL, DRIVE }
 
+/** VCSEC's view of the vehicle. Infotainment cannot answer a handshake while ASLEEP. */
+enum class VehicleSleep { AWAKE, ASLEEP, UNKNOWN }
+
 data class DriveSnapshot(
     val destination: NavigationDestination,
     val speedKph: Double?,
     val minutesToArrival: Double?,
     val distanceKm: Double?,
     val gear: Gear = Gear.UNKNOWN,
+    val odometerKm: Double? = null,
+    /** Null when the response carried no LocationState. */
+    val location: VehicleLocation? = null,
 ) {
     companion object {
-        fun from(state: DriveState): DriveSnapshot {
+        fun from(state: DriveState, location: LocationState? = null): DriveSnapshot {
             val name = state.activeRouteDestination.trim().takeIf { it.isNotEmpty() }
             val point = if (state.hasActiveRouteCoordinates()) {
                 val coords = state.activeRouteCoordinates
@@ -65,7 +87,48 @@ data class DriveSnapshot(
                     ShiftState.TypeCase.D -> Gear.DRIVE
                     else -> Gear.UNKNOWN
                 },
+                if (state.hasOdometerInHundredthsOfAMile())
+                    state.odometerInHundredthsOfAMile.takeIf { it >= 0 }?.let { it / 100.0 * 1.609344 } else null,
+                location?.let(VehicleLocation::from),
             )
         }
+    }
+}
+
+/** Rated range (battery_range), the figure the car screen and Tesla app show; out-of-range values become null. */
+data class BatterySnapshot(val levelPercent: Int?, val rangeKm: Double?) {
+    val empty get() = levelPercent == null && rangeKm == null
+
+    companion object {
+        fun from(state: ChargeState) = BatterySnapshot(
+            if (state.hasBatteryLevel()) state.batteryLevel.takeIf { it in 0..100 } else null,
+            if (state.hasBatteryRange()) state.batteryRange.toDouble().takeIf { it.isFinite() && it in 0.0..1000.0 }?.times(1.609344) else null,
+        )
+    }
+}
+
+enum class ChargingStatus { UNKNOWN, DISCONNECTED, NO_POWER, STARTING, CHARGING, COMPLETE, STOPPED }
+
+/**
+ * One charge_state read shared by the battery card and the logbook. energyAddedKwh is the vehicle's last (or current)
+ * session total; it resets when a new session starts.
+ */
+data class ChargeSnapshot(val status: ChargingStatus, val energyAddedKwh: Double?, val battery: BatterySnapshot = BatterySnapshot(null, null)) {
+    val batteryLevel: Int? get() = battery.levelPercent
+
+    companion object {
+        fun from(state: ChargeState) = ChargeSnapshot(
+            when (state.chargingState.typeCase) {
+                ChargeState.ChargingState.TypeCase.DISCONNECTED -> ChargingStatus.DISCONNECTED
+                ChargeState.ChargingState.TypeCase.NOPOWER -> ChargingStatus.NO_POWER
+                ChargeState.ChargingState.TypeCase.STARTING -> ChargingStatus.STARTING
+                ChargeState.ChargingState.TypeCase.CHARGING -> ChargingStatus.CHARGING
+                ChargeState.ChargingState.TypeCase.COMPLETE -> ChargingStatus.COMPLETE
+                ChargeState.ChargingState.TypeCase.STOPPED -> ChargingStatus.STOPPED
+                else -> ChargingStatus.UNKNOWN
+            },
+            if (state.hasChargeEnergyAdded()) state.chargeEnergyAdded.toDouble().takeIf { it.isFinite() && it >= 0 } else null,
+            BatterySnapshot.from(state),
+        )
     }
 }

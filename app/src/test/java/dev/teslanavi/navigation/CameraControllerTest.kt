@@ -143,6 +143,25 @@ class CameraControllerTest {
     private fun connected(goal: NavigationDestination = destination, vin: String = "vehicle-a", speed: Double? = 10.0, gear: Gear = Gear.DRIVE) = DriveState(
         vin = vin, phase = DrivePhase.CONNECTED, snapshot = DriveSnapshot(goal, speed, null, null, gear))
 
+    @Test fun approachingCameraIsPreparedWithTheExactSentenceLaterAnnounced() = runTest {
+        val engine = FakeNavigationEngine()
+        val speaker = FakeSpeaker()
+        val controller = CameraController(engine, speaker) { testScheduler.currentTime }
+        val job = backgroundScope.launch { controller.run("key", MutableStateFlow(connected())) }
+        runCurrent()
+        engine.frame(listOf(camera.copy(distanceMeters = 1250), camera.copy(id = "far", distanceMeters = 1400)), 0, road = RoadClass.GENERAL)
+        runCurrent()
+        assertTrue(speaker.spoken.isEmpty())
+        assertEquals(listOf("300미터 앞 과속 단속 카메라가 있습니다. 제한속도 시속 60킬로미터입니다.", "제한속도 60킬로미터 초과입니다."),
+            speaker.prefetched)
+        speaker.prefetched.clear()
+        engine.frame(listOf(camera.copy(distanceMeters = 281)), 0, road = RoadClass.GENERAL)
+        runCurrent()
+        assertEquals(listOf("300미터 앞 과속 단속 카메라가 있습니다. 제한속도 시속 60킬로미터입니다."), speaker.spoken)
+        assertEquals("announced camera is not prepared again", listOf("제한속도 60킬로미터 초과입니다."), speaker.prefetched)
+        job.cancelAndJoin()
+    }
+
     @Test fun changingDistanceAppliesToNextFrameWithoutRestartingRoute() = runTest {
         val engine = FakeNavigationEngine()
         val speaker = FakeSpeaker()
@@ -550,6 +569,8 @@ private class FakeSpeaker : CameraSpeaker {
         return true
     }
     val spoken = mutableListOf<String>()
+    val prefetched = mutableListOf<String>()
+    override fun prefetch(text: String) { prefetched += text }
     var tripStarts = 0
     var alarm = false
     override fun setOverSpeedAlert(active: Boolean) { alarm = active }

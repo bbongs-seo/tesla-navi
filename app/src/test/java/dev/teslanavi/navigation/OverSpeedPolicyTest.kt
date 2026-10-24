@@ -47,4 +47,12 @@ class OverSpeedPolicyTest {
         assertNull(policy.next(camera, 64.0, RoadClass.GENERAL, 61_000))
         assertNotNull(policy.next(camera, 65.0, RoadClass.GENERAL, 62_000))
     }
+
+    @Test fun upcomingWarningIsTheExactTextAndOnlyForUsableLimits() {
+        val policy = OverSpeedPolicy()
+        assertEquals(policy.next(camera, 70.0, RoadClass.GENERAL, 0)!!.text, policy.upcoming(camera.copy(distanceMeters = 1300), RoadClass.GENERAL))
+        assertNull(policy.upcoming(camera.copy(distanceMeters = 1301), RoadClass.GENERAL))
+        assertNull(policy.upcoming(camera.copy(variableLimit = true), RoadClass.GENERAL))
+        listOf(null, 0).forEach { assertNull(policy.upcoming(camera.copy(speedLimitKph = it), RoadClass.GENERAL)) }
+    }
 }

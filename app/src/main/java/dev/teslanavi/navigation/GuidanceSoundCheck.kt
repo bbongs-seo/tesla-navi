@@ -1,5 +1,6 @@
 package dev.teslanavi.navigation
 
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.material3.OutlinedButton
@@ -7,17 +8,17 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 
 @Composable
-fun GuidanceSoundCheck(volumePercent: Int, guidanceActive: Boolean) {
-    val context = LocalContext.current.applicationContext
+fun GuidanceSoundCheck(volumePercent: Int, guidanceActive: Boolean, createSpeaker: () -> CameraSpeaker) {
     val scope = rememberCoroutineScope()
-    val preview = remember(scope, context) { GuidanceAudioPreview(scope) { AndroidCameraSpeaker(context) } }
+    val preview = remember(scope) { GuidanceAudioPreview(scope, createSpeaker) }
     val state by preview.state.collectAsStateWithLifecycle()
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     LaunchedEffect(volumePercent) { preview.setVolume(volumePercent) }
@@ -27,7 +28,7 @@ fun GuidanceSoundCheck(volumePercent: Int, guidanceActive: Boolean) {
         lifecycle.addObserver(observer)
         onDispose { lifecycle.removeObserver(observer); preview.stop() }
     }
-    Column {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         OutlinedButton(onClick = { preview.play(PreviewSound.CAMERA_VOICE, volumePercent) },
             enabled = !guidanceActive, modifier = Modifier.fillMaxWidth()) { Text("카메라 음성 테스트") }
         OutlinedButton(onClick = { preview.play(PreviewSound.OVERSPEED_CHIME, volumePercent) },
@@ -37,7 +38,8 @@ fun GuidanceSoundCheck(volumePercent: Int, guidanceActive: Boolean) {
             TextButton(onClick = preview::stop) { Text("테스트 중지") }
         }
         state.message?.let { Text(it) }
-        if (guidanceActive) Text("실제 주행 안내 중에는 소리 테스트를 사용할 수 없습니다.")
-        else Text("차량 연결 없이 테스트할 수 있습니다. 소리가 안 들리면 휴대폰 미디어 음량과 출력 기기를 확인해 주세요.")
+        Text(if (guidanceActive) "실제 주행 안내 중에는 소리 테스트를 사용할 수 없습니다."
+            else "차량 연결 없이 테스트할 수 있습니다. 소리가 안 들리면 휴대폰 미디어 음량과 출력 기기를 확인해 주세요.",
+            fontSize = 12.sp, color = Hint)
     }
 }

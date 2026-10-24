@@ -47,4 +47,17 @@ class CameraAlertPolicyTest {
         policy.commit(checkNotNull(policy.next(camera, RoadClass.GENERAL, 2000)))
         assertNotNull(policy.next(camera, RoadClass.GENERAL, 302001))
     }
+    @Test fun upcomingTextMatchesTheAnnouncementAtTheAlertDistance() {
+        val policy = CameraAlertPolicy()
+        val options = GuidanceOptions(highwayMeters = 800)
+        val approaching = camera.copy(distanceMeters = 1500, variableLimit = true)
+        val prepared = checkNotNull(policy.upcoming(approaching, RoadClass.HIGHWAY, options))
+        assertEquals("800미터 앞 과속 단속 카메라가 있습니다. 제한속도 시속 60킬로미터입니다. 가변 제한속도 표지판을 확인해 주세요.", prepared)
+        assertNull(policy.upcoming(approaching.copy(distanceMeters = 1801), RoadClass.HIGHWAY, options))
+        assertNull("inside the alert zone next() takes over", policy.upcoming(approaching.copy(distanceMeters = 800), RoadClass.HIGHWAY, options))
+        val announced = checkNotNull(policy.next(approaching.copy(distanceMeters = 790), RoadClass.HIGHWAY, 0, options))
+        assertEquals(prepared, announced.text)
+        policy.commit(announced)
+        assertNull(policy.upcoming(approaching, RoadClass.HIGHWAY, options))
+    }
 }
