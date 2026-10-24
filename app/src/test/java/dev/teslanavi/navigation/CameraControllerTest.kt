@@ -15,6 +15,47 @@ import org.junit.Test
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class CameraControllerTest {
+    @Test fun unknownNearbyCameraDoesNotMaskOverspeedCameraEvenBeyondDisplayLimit() = runTest {
+        val engine = FakeNavigationEngine()
+        val speaker = FakeSpeaker()
+        val controller = CameraController(engine, speaker) { testScheduler.currentTime }
+        val job = backgroundScope.launch { controller.run("key", MutableStateFlow(connected())) }
+        runCurrent()
+        val unknown = (1..3).map { camera.copy(id = "unknown-$it", distanceMeters = it * 30, speedLimitKph = null) }
+        engine.frame(unknown + camera.copy(distanceMeters = 200), 0, speed = 70); runCurrent()
+        assertTrue(speaker.alarm)
+        assertTrue(speaker.spoken.single().contains("제한속도 60킬로미터 초과입니다"))
+        assertEquals(3, controller.state.value.cameras.size)
+        job.cancelAndJoin()
+    }
+
+    @Test fun initializationRetriesAndRecoversWithoutVehicleReconnect() = runTest {
+        val engine = FakeNavigationEngine().apply { initializationError = IllegalStateException("temporary failure") }
+        val controller = CameraController(engine, FakeSpeaker()) { testScheduler.currentTime }
+        val job = backgroundScope.launch { controller.run("key", MutableStateFlow(connected())) }
+        runCurrent()
+        assertEquals(CameraPhase.ERROR, controller.state.value.phase)
+        engine.initializationError = null
+        advanceTimeBy(5001); runCurrent()
+        assertEquals(listOf(destination), engine.destinations)
+        assertNull(controller.state.value.error)
+        job.cancelAndJoin()
+    }
+
+    @Test fun parkingCancelsPendingRetryAndLongStopCanResumeGuidance() = runTest {
+        val engine = FakeNavigationEngine().apply { initializationError = IllegalStateException("temporary failure") }
+        val controller = CameraController(engine, FakeSpeaker()) { testScheduler.currentTime }
+        val drive = MutableStateFlow(connected())
+        val job = backgroundScope.launch { controller.run("key", drive) }
+        runCurrent()
+        drive.value = connected(speed = 0.0, gear = Gear.PARK); runCurrent()
+        engine.initializationError = null
+        advanceTimeBy(600_000); runCurrent()
+        assertTrue(engine.destinations.isEmpty())
+        drive.value = connected(); runCurrent()
+        assertEquals(listOf(destination), engine.destinations)
+        job.cancelAndJoin()
+    }
     private val destination = NavigationDestination.Active("서울역", GeoPoint(37.555, 126.971))
     private val camera = CameraReading("camera-a", CameraKind.SPEED, 60, 400)
     private fun connected(goal: NavigationDestination = destination, vin: String = "vehicle-a", speed: Double? = 10.0, gear: Gear = Gear.DRIVE) = DriveState(
@@ -328,7 +369,8 @@ class CameraControllerTest {
         val controller = CameraController(engine, speaker) { testScheduler.currentTime }
         val job = backgroundScope.launch { controller.run("key", MutableStateFlow(connected())) }
         runCurrent()
-        engine.frame(listOf(camera), 0); runCurrent()
+        engine.frame(listOf(camera), 0, speed = 70); runCurrent()
+        assertTrue(speaker.alarm)
         assertEquals("한국어 음성 데이터 없음", controller.state.value.voiceError)
         assertEquals(1, controller.state.value.cameras.size)
         assertTrue(speaker.spoken.isEmpty())
@@ -354,10 +396,12 @@ class CameraControllerTest {
         val engine = FakeNavigationEngine().apply { initializationError = IllegalStateException("인증 오류") }
         val controller = CameraController(engine, FakeSpeaker()) { testScheduler.currentTime }
         val drive = MutableStateFlow(connected())
-        controller.run("key", drive)
+        val job = backgroundScope.launch { controller.run("key", drive) }
+        runCurrent()
         assertEquals(CameraPhase.ERROR, controller.state.value.phase)
         assertEquals("인증 오류", controller.state.value.error)
         assertEquals(DrivePhase.CONNECTED, drive.value.phase)
+        job.cancelAndJoin()
     }
 
     @Test fun repeatedVehiclePollingDoesNotRequestTheSameRouteAgain() = runTest {

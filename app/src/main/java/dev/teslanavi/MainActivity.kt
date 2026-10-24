@@ -22,6 +22,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
@@ -108,7 +109,8 @@ class MainActivity : ComponentActivity() {
                         onAutomatic = { enabled -> if (enabled) beginAutomatic() else AutoConnectService.disable(this) },
                         onMute = { app.cameras.setMuted(it) })
                 }
-                if (showGuidance) GuidanceSettingsDialog(app.guidance) { showGuidance = false }
+                if (showGuidance) GuidanceSettingsDialog(app.guidance,
+                    cameras.phase in setOf(CameraPhase.INITIALIZING, CameraPhase.WAITING_GPS, CameraPhase.GUIDING)) { showGuidance = false }
                 if (backgroundDisclosure.value) AlertDialog(
                     onDismissRequest = { backgroundDisclosure.value = false; pendingAutomatic = false },
                     title = { Text("자동 연결에 필요한 위치 권한") },
@@ -226,12 +228,16 @@ private fun VehicleScreen(profiles: List<VehicleProfile>, selected: String?, sta
                 Spacer(Modifier.height(8.dp))
                 Text("내 차의 목적지", fontSize = 25.sp, fontWeight = FontWeight.Bold)
             }
-            Column(horizontalAlignment = Alignment.End) {
-                Surface(color = Color(0xFF243039), shape = RoundedCornerShape(50)) {
-                    Text(if (state.phase == DrivePhase.CONNECTED) "● 연결됨" else "● 대기", Modifier.padding(12.dp, 8.dp), color = Mint, fontSize = 12.sp)
-                }
-                TextButton(onClick = onSettings) { Text("안내 설정") }
+            Surface(color = Color(0xFF243039), shape = RoundedCornerShape(50)) {
+                Text(if (state.phase == DrivePhase.CONNECTED) "● 연결됨" else "● 대기", Modifier.padding(12.dp, 8.dp), color = Mint, fontSize = 12.sp)
             }
+        }
+        Button(onClick = onSettings, modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp),
+            shape = RoundedCornerShape(16.dp),
+            colors = ButtonDefaults.buttonColors(containerColor = Mint, contentColor = Ink)) {
+            Icon(painterResource(R.drawable.ic_settings), contentDescription = null, modifier = Modifier.size(24.dp))
+            Spacer(Modifier.width(10.dp))
+            Text("안내 설정", fontSize = 17.sp, fontWeight = FontWeight.Bold)
         }
         if (state.phase == DrivePhase.CONNECTED) CameraCard(cameras, hasKakaoKey, onMute, options)
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -268,11 +274,11 @@ private fun VehicleScreen(profiles: List<VehicleProfile>, selected: String?, sta
                     Text("차량 접근 시 자동 연결", fontWeight = FontWeight.SemiBold)
                     Text("연결 → 주행 시작 → 카메라 안내", color = Muted, fontSize = 12.sp)
                 }
-                Switch(checked = autoEnabled, onCheckedChange = onAutomatic, enabled = activeProfile != null,
+                Switch(checked = autoEnabled, onCheckedChange = onAutomatic, enabled = profiles.isNotEmpty(),
                     modifier = Modifier.semantics { contentDescription = "자동 연결" })
             }
             Text(autoStatus, color = Muted, fontSize = 13.sp)
-            Text("선택한 차량에 연결합니다. 처음 한 번은 앱 키 등록과 차량 연결이 필요합니다.", color = Muted, fontSize = 11.sp)
+            Text("키 인증을 마친 등록 차량 중 먼저 감지된 차량에 자동 연결합니다. 각 차량은 처음 한 번 앱 키 등록과 차량 연결이 필요합니다.", color = Muted, fontSize = 11.sp)
             if (autoEnabled) TextButton(onClick = { onAutomatic(true) }) { Text("권한 확인 · 대기 재시작") }
         }
         AppCard {
@@ -350,7 +356,7 @@ private fun CameraCard(state: CameraState, hasKey: Boolean, onMute: (Boolean) ->
         if (state.phase == CameraPhase.INITIALIZING) LinearProgressIndicator(Modifier.fillMaxWidth(), color = Mint)
         if (state.overSpeed) Text("과속 경고 · 제한속도보다 5 km/h 이상 빠릅니다", color = MaterialTheme.colorScheme.error,
             fontWeight = FontWeight.Bold)
-        val next = state.cameras.firstOrNull()
+        val next = state.overSpeedCamera ?: state.cameras.firstOrNull()
         if (next != null) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                 Surface(color = Color(0xFF203732), shape = RoundedCornerShape(20.dp)) {
@@ -422,7 +428,7 @@ private fun VehicleDialog(onDismiss: () -> Unit, onSave: (String, String) -> Uni
 }
 
 @Composable
-private fun GuidanceSettingsDialog(settings: GuidanceSettings, onDismiss: () -> Unit) {
+private fun GuidanceSettingsDialog(settings: GuidanceSettings, guidanceActive: Boolean, onDismiss: () -> Unit) {
     val options by settings.options.collectAsStateWithLifecycle()
     var volume by remember(options.volumePercent) { mutableFloatStateOf(options.volumePercent.toFloat()) }
     var highway by remember(options.highwayMeters) { mutableFloatStateOf(options.highwayMeters.toFloat()) }
@@ -435,6 +441,7 @@ private fun GuidanceSettingsDialog(settings: GuidanceSettings, onDismiss: () -> 
                 Slider(value = volume, onValueChange = { volume = it }, onValueChangeFinished = { settings.volume(volume.roundToInt()) },
                     valueRange = 0f..100f, steps = 19, modifier = Modifier.semantics { contentDescription = "안내 음량" })
                 Text("휴대폰 미디어 음량 기준 · 음성과 경고음에 함께 적용", fontSize = 12.sp, color = Muted)
+                GuidanceSoundCheck(volume.roundToInt(), guidanceActive)
                 Text("고속도로 ${highway.roundToInt()} m 전", fontWeight = FontWeight.SemiBold)
                 Slider(value = highway, onValueChange = { highway = it }, onValueChangeFinished = { settings.highway(highway.roundToInt()) },
                     valueRange = 100f..2000f, steps = 18, modifier = Modifier.semantics { contentDescription = "고속도로 안내 거리" })

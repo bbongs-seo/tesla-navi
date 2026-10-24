@@ -9,7 +9,6 @@ import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
-import android.os.SystemClock
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
@@ -55,9 +54,10 @@ class DriveService : Service() {
         val automatic = intent?.getBooleanExtra("automatic", false) == true
         val profile = app.vehicles.vehicles.value.firstOrNull { it.vin == intent?.getStringExtra("vin") }
         if (profile == null) { app.drive.clear(); stopSelf(); return START_NOT_STICKY }
-        if (automatic && (!app.autoConnect.enabled.value || profile.vin != app.vehicles.selected.value || profile.vin !in app.autoConnect.verified.value)) {
+        if (automatic && (!app.autoConnect.enabled.value || profile.vin !in app.autoConnect.verified.value)) {
             app.drive.clear(); stopSelf(); return START_NOT_STICKY
         }
+        if (automatic) app.vehicles.select(profile.vin)
         val nativeKey = app.kakao.nativeKey.orEmpty()
         val hasLocation = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
         val cameraEnabled = nativeKey.isNotBlank() && hasLocation
@@ -66,6 +66,7 @@ class DriveService : Service() {
                 if (Build.VERSION.SDK_INT >= 29) ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE or
                     (if (cameraEnabled) ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION else 0) else 0)
         } catch (error: Exception) { app.drive.fail(error); stopSelf(); return START_NOT_STICKY }
+        busy = true
         app.drive.prepare(profile.vin, automatic)
         val enroll = intent?.getBooleanExtra("enroll", false) == true
         session = scope.launch {
@@ -94,21 +95,7 @@ class DriveService : Service() {
                     if (!AutoConnectService.running) getSystemService(NotificationManager::class.java).notify(1, notification(it))
                 }
             }
-            val parked = launch parked@{
-                if (!automatic) return@parked
-                val timeout = TripIdleTimeout()
-                while (isActive) {
-                    val current = app.drive.state.value
-                    val now = SystemClock.elapsedRealtime()
-                    if (timeout.expired(current, now)) {
-                        app.autoConnect.proximity.awaitDeparture(now)
-                        app.autoConnect.report("주차 대기 종료 · 차량에서 멀어졌다 접근하면 다시 연결합니다")
-                        session?.cancel()
-                        return@parked
-                    }
-                    delay(1000)
-                }
-            }
+            // Keep observing P so departure after a long stop can restart guidance.
             try { app.drive.run(profile, enroll) }
             catch (error: TimeoutCancellationException) { app.drive.fail(error) }
             catch (error: CancellationException) { app.drive.clear(); throw error }
@@ -116,10 +103,11 @@ class DriveService : Service() {
             finally {
                 withContext(NonCancellable) {
                     cameraSession.cancelAndJoin()
-                    keepAwake.cancel(); updates.cancel(); parked.cancel(); stopForeground(STOP_FOREGROUND_REMOVE); stopSelf()
+                    keepAwake.cancel(); updates.cancel(); stopForeground(STOP_FOREGROUND_REMOVE); stopSelf()
                     if (automatic && app.drive.state.value.phase == DrivePhase.ERROR && profile.vin in app.autoConnect.verified.value) {
                         app.autoConnect.report("연결 대기 · 차량이 가까워지면 다시 시도합니다")
                     }
+                    busy = false
                 }
             }
         }
@@ -137,12 +125,15 @@ class DriveService : Service() {
 
     override fun onDestroy() {
         scope.cancel()
+        busy = false
         wakeLock?.let { if (it.isHeld) it.release() }
         super.onDestroy()
     }
     override fun onBind(intent: Intent?): IBinder? = null
 
     companion object {
+        @Volatile var busy = false
+            private set
         private const val CHANNEL = "vehicle-connection"
         private const val OWNERSHIP = "dev.teslanavi.NOTIFICATION_OWNER"
         fun notificationOwnerChanged(context: Context) {

@@ -45,7 +45,7 @@ class CameraController(
         speaker.setOverSpeedAlert(false)
         speaker.silence()
         _state.update { it.copy(cameras = emptyList(), locationAtMillis = null, currentSpeedKph = null,
-            roadClass = RoadClass.UNKNOWN, overSpeed = false) }
+            roadClass = RoadClass.UNKNOWN, overSpeed = false, overSpeedCamera = null) }
     }
 
     suspend fun run(nativeKey: String, drive: StateFlow<DriveState>) {
@@ -67,7 +67,7 @@ class CameraController(
                                 if (_state.value.mode != event.mode) {
                                     policy.clear(); overSpeedPolicy.clear(); speaker.setOverSpeedAlert(false); speaker.silence()
                                     _state.update { it.copy(cameras = emptyList(), locationAtMillis = null,
-                                        currentSpeedKph = null, roadClass = RoadClass.UNKNOWN, overSpeed = false) }
+                                        currentSpeedKph = null, roadClass = RoadClass.UNKNOWN, overSpeed = false, overSpeedCamera = null) }
                                 }
                                 _state.update { it.copy(mode = event.mode, message = event.message) }
                             }
@@ -75,30 +75,31 @@ class CameraController(
                                 policy.clear(); overSpeedPolicy.clear(); speaker.setOverSpeedAlert(false); speaker.silence()
                                 _state.update { it.copy(cameras = emptyList(), locationAtMillis = null,
                                     phase = CameraPhase.WAITING_GPS, message = event.message,
-                                    currentSpeedKph = null, roadClass = RoadClass.UNKNOWN, overSpeed = false) }
+                                    currentSpeedKph = null, roadClass = RoadClass.UNKNOWN, overSpeed = false, overSpeedCamera = null) }
                             }
                             is NavigationEvent.Frame -> {
                                 val fresh = event.locationAtMillis?.let { clock() - it in 0..10000 } == true
                                 val cameras = if (fresh) event.cameras.filter { it.distanceMeters in 0..10000 }
-                                    .distinctBy { it.id }.sortedBy { it.distanceMeters }.take(3) else emptyList()
+                                    .distinctBy { it.id }.sortedBy { it.distanceMeters } else emptyList()
                                 val car = drive.value
                                 val carSpeed = car.takeIf { it.phase == DrivePhase.CONNECTED &&
                                     it.updatedAt?.let { time -> System.currentTimeMillis() - time in 0..10_000 } == true }
                                     ?.snapshot?.speedKph?.takeIf { it.isFinite() && it >= 0 }
                                 val speed = if (fresh) carSpeed ?: event.speedKph?.takeIf { it >= 0 }?.toDouble() else null
                                 val road = if (fresh) event.roadClass else RoadClass.UNKNOWN
-                                val overSpeed = overSpeedPolicy.isOverSpeed(cameras.firstOrNull(), speed, road, settings.value)
+                                val speedCamera = cameras.firstOrNull { overSpeedPolicy.isOverSpeed(it, speed, road, settings.value) }
+                                val overSpeed = speedCamera != null
                                 _state.update { it.copy(phase = if (fresh) CameraPhase.GUIDING else CameraPhase.WAITING_GPS,
-                                    cameras = cameras, locationAtMillis = event.locationAtMillis,
-                                    currentSpeedKph = speed, roadClass = road, overSpeed = overSpeed) }
-                                speaker.setOverSpeedAlert(overSpeed && !_state.value.muted && _state.value.voiceError == null)
+                                    cameras = cameras.take(3), locationAtMillis = event.locationAtMillis,
+                                    currentSpeedKph = speed, roadClass = road, overSpeed = overSpeed, overSpeedCamera = speedCamera) }
+                                speaker.setOverSpeedAlert(overSpeed && !_state.value.muted)
                                 if (!fresh) speaker.silence()
                                 if (fresh && !_state.value.muted && _state.value.voiceError == null) {
                                     val now = clock()
                                     val presence = cameras.firstNotNullOfOrNull { policy.next(it, road, now, settings.value) }
-                                    val speedWarning = overSpeedPolicy.next(cameras.firstOrNull(), speed, road, now, settings.value)
+                                    val speedWarning = overSpeedPolicy.next(speedCamera, speed, road, now, settings.value)
                                     val presenceWithWarning = presence?.takeIf {
-                                        speedWarning == null || it.cameraId == cameras.firstOrNull()?.id
+                                        speedWarning == null || it.cameraId == speedCamera?.id
                                     }
                                     val text = listOfNotNull(presenceWithWarning?.text, speedWarning?.text).joinToString(" ")
                                     if (text.isNotBlank() && speaker.speak(text)) {
@@ -120,7 +121,7 @@ class CameraController(
                             speaker.setOverSpeedAlert(false); speaker.silence()
                             _state.update { it.copy(phase = CameraPhase.WAITING_GPS, cameras = emptyList(),
                                 locationAtMillis = null, currentSpeedKph = null, roadClass = RoadClass.UNKNOWN,
-                                overSpeed = false, message = "현재 위치를 다시 확인하고 있습니다") }
+                                overSpeed = false, overSpeedCamera = null, message = "현재 위치를 다시 확인하고 있습니다") }
                         }
                     }
                 }
@@ -140,17 +141,35 @@ class CameraController(
                         _state.update { it.copy(phase = CameraPhase.WAITING_DRIVE, mode = null,
                             message = "주행 시작 대기 · 차량 속도 3 km/h 이상에서 안내합니다") }
                     } else {
-                        if (!initialized) {
-                            _state.update { it.copy(phase = CameraPhase.INITIALIZING, message = "카카오내비를 준비하고 있습니다") }
-                            engine.initialize(nativeKey)
-                            val voiceError = speaker.initialize()
-                            _state.update { it.copy(voiceError = voiceError) }
-                            initialized = true
+                        var failures = 0
+                        while (currentCoroutineContext().isActive) {
+                            try {
+                                if (!initialized || _state.value.voiceError != null) {
+                                    _state.update { it.copy(phase = CameraPhase.INITIALIZING, message = "카카오내비를 준비하고 있습니다", error = null) }
+                                    engine.initialize(nativeKey)
+                                    val voiceError = try { speaker.initialize() }
+                                    catch (error: CancellationException) { throw error }
+                                    catch (_: Exception) { "음성 엔진을 시작하지 못했습니다. 경고음은 계속 제공합니다." }
+                                    _state.update { it.copy(voiceError = voiceError) }
+                                    initialized = true
+                                }
+                                pendingTrip = !tripAnnounced
+                                acceptingFrames = true
+                                _state.update { it.copy(phase = CameraPhase.WAITING_GPS, message = "현재 위치를 확인하고 있습니다", error = null) }
+                                engine.guide(destination)
+                                break
+                            } catch (error: Exception) {
+                                if (error is CancellationException && error !is TimeoutCancellationException) throw error
+                                currentCoroutineContext().ensureActive()
+                                invalidate()
+                                engine.pause()
+                                val waitSeconds = (5 * ++failures).coerceAtMost(30)
+                                _state.update { it.copy(phase = CameraPhase.ERROR,
+                                    message = "안내 준비 실패 · ${waitSeconds}초 후 자동 재시도",
+                                    error = error.message?.take(240)) }
+                                delay(waitSeconds * 1000L)
+                            }
                         }
-                        pendingTrip = !tripAnnounced
-                        acceptingFrames = true
-                        _state.update { it.copy(phase = CameraPhase.WAITING_GPS, message = "현재 위치를 확인하고 있습니다") }
-                        engine.guide(destination)
                     }
                 }
             }

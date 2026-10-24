@@ -58,6 +58,7 @@ data class CameraState(
     val currentSpeedKph: Double? = null,
     val roadClass: RoadClass = RoadClass.UNKNOWN,
     val overSpeed: Boolean = false,
+    val overSpeedCamera: CameraReading? = null,
 )
 
 /** One presence announcement per camera; commit only after audio was accepted. */
@@ -84,8 +85,8 @@ class CameraAlertPolicy {
 
 /** The SDK supplies camera-point limits, not a speed limit for every road segment. */
 class OverSpeedPolicy {
-    data class Announcement(val text: String, val atMillis: Long)
-    private var lastSpokenAt: Long? = null
+    data class Announcement(val text: String, val atMillis: Long, val cameraKey: String)
+    private var lastSpokenCamera: String? = null
 
     fun isOverSpeed(camera: CameraReading?, speedKph: Double?, roadClass: RoadClass, options: GuidanceOptions = GuidanceOptions()): Boolean {
         val limit = camera?.speedLimitKph?.takeIf { it > 0 } ?: return false
@@ -94,11 +95,12 @@ class OverSpeedPolicy {
     }
 
     fun next(camera: CameraReading?, speedKph: Double?, roadClass: RoadClass, nowMillis: Long, options: GuidanceOptions = GuidanceOptions()): Announcement? {
-        if (!isOverSpeed(camera, speedKph, roadClass, options)) { lastSpokenAt = null; return null }
-        if (lastSpokenAt != null) return null
-        return Announcement("제한속도 ${camera!!.speedLimitKph}킬로미터 초과입니다.", nowMillis)
+        if (!isOverSpeed(camera, speedKph, roadClass, options)) { lastSpokenCamera = null; return null }
+        val key = "${camera!!.id}:${camera.speedLimitKph}"
+        if (lastSpokenCamera == key) return null
+        return Announcement("제한속도 ${camera.speedLimitKph}킬로미터 초과입니다.", nowMillis, key)
     }
 
-    fun commit(announcement: Announcement) { lastSpokenAt = announcement.atMillis }
-    fun clear() { lastSpokenAt = null }
+    fun commit(announcement: Announcement) { lastSpokenCamera = announcement.cameraKey }
+    fun clear() { lastSpokenCamera = null }
 }

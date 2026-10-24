@@ -21,6 +21,17 @@ import java.io.File
 class VehicleScreenTest {
     @get:Rule val compose = createAndroidComposeRule<MainActivity>()
 
+    @Test fun soundChecksAreAvailableWithoutVehicleAndExplainZeroVolume() {
+        compose.onNodeWithText("안내 설정").performClick()
+        compose.onNodeWithText("카메라 음성 테스트").assertIsEnabled()
+        compose.onNodeWithText("과속 경고음 테스트").assertIsEnabled()
+        compose.onNodeWithContentDescription("안내 음량").performSemanticsAction(SemanticsActions.SetProgress) { it(0f) }
+        compose.onNodeWithText("카메라 음성 테스트").performClick()
+        compose.onNodeWithText("안내 음량이 0%입니다. 음량을 올린 뒤 테스트해 주세요.").assertExists()
+        compose.onNodeWithText("과속 경고음 테스트").performClick()
+        compose.onNodeWithText("안내 음량이 0%입니다. 음량을 올린 뒤 테스트해 주세요.").assertExists()
+    }
+
     @Test fun guidanceControlsSaveAndReopenAtSelectedValues() {
         compose.onNodeWithText("안내 설정").performClick()
         compose.onNodeWithContentDescription("안내 음량").performSemanticsAction(SemanticsActions.SetProgress) { it(35f) }
@@ -29,9 +40,9 @@ class VehicleScreenTest {
         compose.onNodeWithText("닫기").performClick()
         compose.onNodeWithText("안내 설정").performClick()
         compose.onNodeWithText("안내 음량 35%").assertIsDisplayed()
-        compose.onNodeWithText("고속도로 1200 m 전").assertIsDisplayed()
-        compose.onNodeWithText("일반도로 600 m 전").assertIsDisplayed()
         saveScreenshot("guidance-settings")
+        compose.onNodeWithText("고속도로 1200 m 전").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("일반도로 600 m 전").performScrollTo().assertIsDisplayed()
         compose.onNodeWithText("기본값 복원").performScrollTo().performClick()
         compose.onNodeWithText("고속도로 500 m 전").performScrollTo().assertIsDisplayed()
     }

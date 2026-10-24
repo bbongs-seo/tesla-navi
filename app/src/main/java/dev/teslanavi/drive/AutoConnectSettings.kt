@@ -9,7 +9,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 class AutoConnectSettings(context: Context) {
-    val proximity = ProximityGate()
+    val proximity = AutoVehicleDiscovery()
     private val prefs = context.getSharedPreferences("auto-connect", Context.MODE_PRIVATE)
     private val _enabled = MutableStateFlow(prefs.getBoolean("enabled", false))
     val enabled = _enabled.asStateFlow()

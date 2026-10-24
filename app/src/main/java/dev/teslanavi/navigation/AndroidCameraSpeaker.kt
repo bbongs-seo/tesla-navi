@@ -6,7 +6,6 @@ import android.media.AudioFocusRequest
 import android.media.AudioManager
 import android.media.AudioTrack
 import android.media.AudioFormat
-import kotlin.math.*
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -31,21 +30,12 @@ class AndroidCameraSpeaker(private val context: Context) : CameraSpeaker {
             if (utterance == null && acquireFocus()) {
                 runCatching {
                     track?.release()
-                    val rate = 22050
-                    val samples = ShortArray(rate) { i ->
-                        val t = i.toDouble() / rate
-                        val local = if (t < .4) t else t - .4
-                        val frequency = if (t < .4) 880.0 else 660.0
-                        if (local in 0.0..0.28) (sin(2 * PI * frequency * local) * exp(-local * 9) * 26000).toInt().toShort() else 0
-                    }
+                    val bytes = WarningChime.pcm
                     track = AudioTrack.Builder().setAudioAttributes(attributes)
-                        .setAudioFormat(AudioFormat.Builder().setSampleRate(rate).setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                        .setAudioFormat(AudioFormat.Builder().setSampleRate(WarningChime.SAMPLE_RATE).setEncoding(AudioFormat.ENCODING_PCM_16BIT)
                             .setChannelMask(AudioFormat.CHANNEL_OUT_MONO).build())
-                        .setTransferMode(AudioTrack.MODE_STATIC).setBufferSizeInBytes(samples.size * 2).build().apply {
-                            val bytes = ByteArray(samples.size * 2)
-                            samples.forEachIndexed { i, value ->
-                                bytes[i * 2] = value.toByte(); bytes[i * 2 + 1] = (value.toInt() shr 8).toByte()
-                            }
+                        .setTransferMode(AudioTrack.MODE_STATIC).setBufferSizeInBytes(bytes.size).build()
+                    checkNotNull(track).apply {
                             check(write(bytes, 0, bytes.size) == bytes.size) { "경고음 PCM 데이터 전송 실패" }
                             setVolume(gain)
                             play()
@@ -73,6 +63,7 @@ class AndroidCameraSpeaker(private val context: Context) : CameraSpeaker {
         engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
             override fun onStart(id: String?) = Unit
             override fun onDone(id: String?) { finished(id) }
+            override fun onStop(id: String?, interrupted: Boolean) { finished(id) }
             @Deprecated("Required by the Android TTS API")
             override fun onError(id: String?) { finished(id) }
             override fun onError(id: String?, errorCode: Int) { finished(id) }

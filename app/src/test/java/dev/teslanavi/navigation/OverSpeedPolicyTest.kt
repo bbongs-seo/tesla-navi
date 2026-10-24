@@ -4,6 +4,12 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class OverSpeedPolicyTest {
+    @Test fun nextCameraGetsItsOwnLimitAnnouncementDuringContinuousOverspeed() {
+        val policy = OverSpeedPolicy()
+        policy.commit(checkNotNull(policy.next(camera, 85.0, RoadClass.GENERAL, 0)))
+        val second = checkNotNull(policy.next(camera.copy(id = "b", speedLimitKph = 80), 85.0, RoadClass.GENERAL, 1000))
+        assertTrue(second.text.contains("80킬로미터"))
+    }
     private val camera = CameraReading("a", CameraKind.SPEED, 60, 300)
 
     @Test fun warningStartsAtFiveKphAboveLimit() {
