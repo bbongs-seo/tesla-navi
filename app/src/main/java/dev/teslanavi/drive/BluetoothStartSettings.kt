@@ -58,6 +58,13 @@ class BluetoothStartSettings(private val context: Context) {
         publishConnections()
     }
 
+    fun profileConnectionChanged(profile: Int, address: String, connected: Boolean) {
+        generation++
+        val current = profiles[profile].orEmpty()
+        profiles[profile] = if (connected) current + address else current - address
+        publishConnections()
+    }
+
     private fun publishConnections() {
         val connected = acl + profiles.values.flatten()
         mutable.update { it.copy(devices = it.devices.map { device -> device.copy(connected = device.address in connected) }) }

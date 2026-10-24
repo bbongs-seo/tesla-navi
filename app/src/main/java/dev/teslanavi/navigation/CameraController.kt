@@ -22,6 +22,7 @@ class CameraController(
     private var pendingTrip = false
     private var acceptingFrames = false
     private var audioGeneration = 0L
+    private var tripSpeech: Any? = null
 
     fun configured(hasKey: Boolean) {
         _state.value = CameraState(phase = if (hasKey) CameraPhase.IDLE else CameraPhase.KEY_REQUIRED,
@@ -31,7 +32,7 @@ class CameraController(
 
     fun setMuted(muted: Boolean) {
         _state.update { it.copy(muted = muted) }
-        if (muted) { audioGeneration++; speaker.setOverSpeedAlert(false); speaker.silence() }
+        if (muted) { audioGeneration++; tripSpeech = null; speaker.setOverSpeedAlert(false); speaker.silence() }
     }
 
     fun blocked(message: String) {
@@ -41,6 +42,7 @@ class CameraController(
 
     private fun invalidate() {
         audioGeneration++
+        tripSpeech = null
         acceptingFrames = false
         policy.clear()
         overSpeedPolicy.clear()
@@ -77,6 +79,7 @@ class CameraController(
                             is NavigationEvent.Mode -> {
                                 if (_state.value.mode != event.mode) {
                                     audioGeneration++
+                                    tripSpeech = null
                                     policy.clear(); overSpeedPolicy.clear(); speaker.setOverSpeedAlert(false); speaker.silence()
                                     _state.update { it.copy(cameras = emptyList(), locationAtMillis = null,
                                         currentSpeedKph = null, roadClass = RoadClass.UNKNOWN, overSpeed = false, overSpeedCamera = null) }
@@ -85,6 +88,7 @@ class CameraController(
                             }
                             is NavigationEvent.RouteInvalidated -> {
                                 audioGeneration++
+                                tripSpeech = null
                                 policy.clear(); overSpeedPolicy.clear(); speaker.setOverSpeedAlert(false); speaker.silence()
                                 _state.update { it.copy(cameras = emptyList(), locationAtMillis = null,
                                     phase = CameraPhase.WAITING_GPS, message = event.message,
@@ -106,7 +110,7 @@ class CameraController(
                                     cameras = cameras.take(3), locationAtMillis = event.locationAtMillis,
                                     currentSpeedKph = speed, roadClass = road, overSpeed = overSpeed, overSpeedCamera = speedCamera) }
                                 speaker.setOverSpeedAlert(overSpeed && !_state.value.muted)
-                                if (!fresh) speaker.silence()
+                                if (!fresh && tripSpeech == null) speaker.silence()
                                 if (fresh && !_state.value.muted && _state.value.voiceError == null) {
                                     val now = clock()
                                     val presence = cameras.firstNotNullOfOrNull { policy.next(it, road, now, settings.value) }
@@ -136,15 +140,22 @@ class CameraController(
                     while (isActive) {
                         delay(1000)
                         if (pendingTrip && acceptingFrames && !_state.value.muted && _state.value.voiceError == null) {
-                            val generation = audioGeneration
-                            speaker.speak("주행시작") { completed ->
-                                if (completed && acceptingFrames && generation == audioGeneration) {
-                                    pendingTrip = false; tripAnnounced = true
-                                }
+                            val token = Any()
+                            tripSpeech = token
+                            val accepted = speaker.speak("주행시작") {
+                                if (tripSpeech === token) tripSpeech = null
+                            }
+                            // This one-off trip event must not loop when playback is interrupted.
+                            // Camera and overspeed warnings still commit only on completion.
+                            if (accepted) {
+                                pendingTrip = false; tripAnnounced = true
+                            } else if (tripSpeech === token) {
+                                tripSpeech = null
                             }
                         }
                         if (_state.value.locationAtMillis?.let { clock() - it > 10000 } == true) {
-                            speaker.setOverSpeedAlert(false); speaker.silence()
+                            speaker.setOverSpeedAlert(false)
+                            if (tripSpeech == null) speaker.silence()
                             _state.update { it.copy(phase = CameraPhase.WAITING_GPS, cameras = emptyList(),
                                 locationAtMillis = null, currentSpeedKph = null, roadClass = RoadClass.UNKNOWN,
                                 overSpeed = false, overSpeedCamera = null, message = "현재 위치를 다시 확인하고 있습니다") }

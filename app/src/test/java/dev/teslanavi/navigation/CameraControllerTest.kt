@@ -15,6 +15,51 @@ import org.junit.Test
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class CameraControllerTest {
+    @Test fun staleGpsDoesNotInterruptTripStartOrRepeatItAfterAnInterruptedPlayback() = runTest {
+        val engine = FakeNavigationEngine()
+        val speaker = FakeSpeaker().apply { deferCompletion = true }
+        val controller = CameraController(engine, speaker) { testScheduler.currentTime }
+        val job = backgroundScope.launch { controller.run("key", MutableStateFlow(connected())) }
+        runCurrent()
+        advanceTimeBy(1001); runCurrent()
+        assertEquals(1, speaker.tripStarts)
+        val silences = speaker.silenceCalls
+        repeat(5) {
+            engine.frame(emptyList(), testScheduler.currentTime - 11_000); runCurrent()
+            advanceTimeBy(1000); runCurrent()
+        }
+        assertEquals("GPS validity must not stop the departure message", silences, speaker.silenceCalls)
+        speaker.finish(false)
+        repeat(60) {
+            engine.frame(emptyList(), testScheduler.currentTime - 11_000); runCurrent()
+            advanceTimeBy(1000); runCurrent()
+        }
+        assertEquals("interrupted departure is not a recurring warning", 1, speaker.tripStarts)
+        job.cancelAndJoin()
+    }
+
+    @Test fun rejectedTripStartRetriesButAcceptedTripStartDoesNotRepeatAcrossRouteChange() = runTest {
+        val engine = FakeNavigationEngine()
+        val speaker = FakeSpeaker().apply { acceptsAudio = false; deferCompletion = true }
+        val controller = CameraController(engine, speaker) { testScheduler.currentTime }
+        val drive = MutableStateFlow(connected())
+        val job = backgroundScope.launch { controller.run("key", drive) }
+        runCurrent(); advanceTimeBy(1001); runCurrent()
+        assertEquals(0, speaker.tripStarts)
+        speaker.acceptsAudio = true
+        advanceTimeBy(1000); runCurrent()
+        assertEquals(1, speaker.tripStarts)
+        // A route change can cancel playback before onDone arrives.
+        drive.value = connected(NavigationDestination.None); runCurrent()
+        speaker.finish(false)
+        advanceTimeBy(10_000); runCurrent()
+        assertEquals(1, speaker.tripStarts)
+        drive.value = connected(speed = 0.0, gear = Gear.PARK); runCurrent()
+        drive.value = connected(); runCurrent()
+        advanceTimeBy(1001); runCurrent()
+        assertEquals(2, speaker.tripStarts)
+        job.cancelAndJoin()
+    }
     @Test fun failedVoiceRecoversDuringSameDriveWithoutRestartingRouteOrChime() = runTest {
         val engine = FakeNavigationEngine()
         val speaker = FakeSpeaker().apply { initializationError = "temporary TTS failure" }
@@ -557,6 +602,7 @@ private class FakeNavigationEngine : CameraNavigationEngine {
 }
 
 private class FakeSpeaker : CameraSpeaker {
+    var silenceCalls = 0
     override var needsInitialization = false
     var initializations = 0
     var initializationGate: Deferred<Unit>? = null
@@ -584,6 +630,6 @@ private class FakeSpeaker : CameraSpeaker {
         return initializationError
     }
     override fun speak(text: String): Boolean { if (acceptsAudio) { if (text == "주행시작") tripStarts++ else spoken += text }; return acceptsAudio }
-    override fun silence() = Unit
+    override fun silence() { silenceCalls++ }
     override fun close() { closed = true }
 }

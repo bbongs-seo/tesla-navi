@@ -62,6 +62,11 @@ class DriveController(private val context: Context, private val keyStore: Vehicl
     }
     fun clear() { attempts.cancelled(); _state.value = DriveState(events = history.read()) }
     fun requestRefresh() { refresh.trySend(Unit) }
+    fun recordAutomaticStart(message: String) {
+        android.util.Log.i("TeslaNaviConnection", "자동 시작 · $message")
+        val events = history.append("자동 시작 · $message")
+        _state.update { it.copy(events = events) }
+    }
     private fun status(message: String, phase: DrivePhase? = null) {
         android.util.Log.i("TeslaNaviConnection", message)
         val events = write(attempts.line("[${phase ?: _state.value.phase}] $message"))

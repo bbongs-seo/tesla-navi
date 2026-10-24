@@ -154,7 +154,7 @@ class AndroidCameraSpeaker(private val context: Context,
         val id = UUID.randomUUID().toString()
         utterance = id
         completion = onComplete
-        record("speech requested id=$id gain=$gain musicVolume=${audio.getStreamVolume(AudioManager.STREAM_MUSIC)}")
+        record("speech requested id=$id kind=${if (text == "주행시작") "trip" else "guidance"} gain=$gain musicVolume=${audio.getStreamVolume(AudioManager.STREAM_MUSIC)}")
         handler.postDelayed(speechTimeout, 10_000)
         if (voice != null) {
             voice.render(text) { pcm -> handler.post {
@@ -240,6 +240,7 @@ class AndroidCameraSpeaker(private val context: Context,
     }
 
     private fun stopSpeech() {
+        utterance?.let { record("speech cancelled by app id=$it") }
         handler.removeCallbacks(speechTimeout)
         utterance = null
         releaseVoiceTrack()

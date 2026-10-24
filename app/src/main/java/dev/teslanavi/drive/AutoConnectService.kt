@@ -47,12 +47,14 @@ class AutoConnectService : Service() {
             ServiceCompat.startForeground(this, NOTIFICATION, notification("차량 접근을 기다리고 있습니다"),
                 if (Build.VERSION.SDK_INT >= 29) ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE or
                     ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION else 0)
-        } catch (_: Exception) {
+        } catch (error: Exception) {
+            app.drive.recordAutomaticStart("알림 서비스 준비 실패 · ${error.javaClass.simpleName}")
             app.autoConnect.report("앱에서 자동 연결을 다시 켜 주세요")
             stopSelf()
             return START_NOT_STICKY
         }
         running = true
+        app.drive.recordAutomaticStart("대기 서비스 시작 완료")
         app.bluetoothStart.refresh()
         if (app.drive.state.value.active) DriveService.notificationOwnerChanged(this)
         if (monitor?.isActive != true) monitor = scope.launch {
@@ -74,6 +76,8 @@ class AutoConnectService : Service() {
                         getSystemService(BluetoothManager::class.java)?.adapter?.isEnabled == true
                     }.getOrDefault(false)
                     val location = LocationManagerCompat.isLocationEnabled(getSystemService(LocationManager::class.java))
+                    // Repair missed ACL/profile events, including an already-connected device after restart.
+                    if (bluetooth) app.bluetoothStart.refresh()
                     emit(Triple(permissions, bluetooth, location))
                     delay(10_000)
                 }
@@ -89,7 +93,10 @@ class AutoConnectService : Service() {
                     !target.permissions -> app.autoConnect.report("자동 연결 권한을 확인해 주세요")
                     !target.bluetooth -> app.autoConnect.report("Bluetooth를 켜면 자동 연결을 다시 시작합니다")
                     !target.location -> app.autoConnect.report("휴대폰 위치 기능을 켜면 자동 연결을 다시 시작합니다")
-                    !target.triggerAllowed -> app.autoConnect.report("${target.triggerName ?: "선택한 블루투스 기기"} 연결 대기 · 연결되면 차량을 검색합니다")
+                    !target.triggerAllowed -> {
+                        app.drive.recordAutomaticStart("선택 기기 연결 대기")
+                        app.autoConnect.report("${target.triggerName ?: "선택한 블루투스 기기"} 연결 대기 · 연결되면 차량을 검색합니다")
+                    }
                     target.registered.isEmpty() -> app.autoConnect.report("자동 연결할 차량을 등록해 주세요")
                     app.autoConnect.proximity.scanNames.isEmpty() -> app.autoConnect.report("먼저 차량에 앱 키를 등록하고 한 번 연결해 주세요")
                     else -> {
@@ -111,6 +118,7 @@ class AutoConnectService : Service() {
     // Leaving this function stops the scan; a killed process skips the finally block and keeps it.
     private suspend fun scan(names: Set<String>) {
         try {
+            app.drive.recordAutomaticStart("블루투스 조건 충족 · 차량 BLE 검색 시작")
             app.autoConnect.report("등록 차량 ${names.size}대 접근 대기 · 먼저 감지된 차량에 연결")
             ProximityScan.arm(this, names)
             error("BLE 검색 오류 ${ProximityScan.failures.first()}")

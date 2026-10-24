@@ -4,6 +4,10 @@ import android.Manifest
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothManager
+import android.bluetooth.BluetoothA2dp
+import android.bluetooth.BluetoothHeadset
+import android.bluetooth.BluetoothProfile
+import android.content.ComponentName
 import android.content.Intent
 import androidx.test.core.app.ApplicationProvider
 import dev.teslanavi.TeslaNaviApp
@@ -18,6 +22,62 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], application = TeslaNaviApp::class)
 class BluetoothStartTest {
+    @Test fun refreshingProfilesRestoresAlreadyConnectedDeviceWithoutConnectionBroadcast() {
+        val device = adapter.getRemoteDevice(address)
+        var connected: List<BluetoothDevice> = listOf(device)
+        val proxy = object : BluetoothProfile {
+            override fun getConnectedDevices(): List<BluetoothDevice> = connected
+            override fun getDevicesMatchingConnectionStates(states: IntArray): List<BluetoothDevice> = connected
+            override fun getConnectionState(device: BluetoothDevice): Int =
+                if (device in connected) BluetoothProfile.STATE_CONNECTED else BluetoothProfile.STATE_DISCONNECTED
+        }
+        val restored = BluetoothStartSettings(app)
+        assertFalse(restored.state.value.allowed)
+        shadowOf(adapter).setProfileProxy(BluetoothProfile.A2DP, proxy)
+        restored.refresh()
+        shadowOf(android.os.Looper.getMainLooper()).idle()
+        assertTrue(restored.state.value.allowed)
+        connected = emptyList()
+        shadowOf(adapter).setProfileProxy(BluetoothProfile.A2DP, proxy)
+        restored.refresh()
+        shadowOf(android.os.Looper.getMainLooper()).idle()
+        assertFalse(restored.state.value.allowed)
+    }
+    @Test fun systemBluetoothReceiverIsExportedAndIgnoresUnknownActions() {
+        val receiver = app.packageManager.getReceiverInfo(ComponentName(app, BluetoothStartReceiver::class.java), 0)
+        assertTrue("Bluetooth runs under a different UID and must reach this receiver", receiver.exported)
+        app.autoConnect.setEnabled(true)
+        BluetoothStartReceiver().onReceive(app, event("untrusted.action"))
+        assertNull(shadowOf(app).nextStartedService)
+        assertFalse(app.bluetoothStart.state.value.allowed)
+    }
+
+    @Test fun audioProfileEventsStartAutomationWithoutAnAclEvent() {
+        app.autoConnect.setEnabled(true)
+        val receiver = BluetoothStartReceiver()
+        receiver.onReceive(app, event(BluetoothA2dp.ACTION_CONNECTION_STATE_CHANGED)
+            .putExtra(BluetoothProfile.EXTRA_STATE, BluetoothProfile.STATE_CONNECTED))
+        assertTrue(app.bluetoothStart.state.value.allowed)
+        assertEquals(AutoConnectService::class.java.name, shadowOf(app).nextStartedService.component!!.className)
+        receiver.onReceive(app, event(BluetoothHeadset.ACTION_CONNECTION_STATE_CHANGED)
+            .putExtra(BluetoothProfile.EXTRA_STATE, BluetoothProfile.STATE_CONNECTED))
+        assertNotNull(shadowOf(app).nextStartedService)
+        receiver.onReceive(app, event(BluetoothA2dp.ACTION_CONNECTION_STATE_CHANGED)
+            .putExtra(BluetoothProfile.EXTRA_STATE, BluetoothProfile.STATE_DISCONNECTED))
+        assertTrue("phone profile is still connected", app.bluetoothStart.state.value.allowed)
+        receiver.onReceive(app, event(BluetoothHeadset.ACTION_CONNECTION_STATE_CHANGED)
+            .putExtra(BluetoothProfile.EXTRA_STATE, BluetoothProfile.STATE_DISCONNECTED))
+        assertFalse(app.bluetoothStart.state.value.allowed)
+        assertTrue(app.drive.state.value.events.any { it.contains("선택 기기 연결 수신") })
+    }
+
+    @Test fun connectingProfileDoesNotPrematurelyStartAutomation() {
+        app.autoConnect.setEnabled(true)
+        BluetoothStartReceiver().onReceive(app, event(BluetoothA2dp.ACTION_CONNECTION_STATE_CHANGED)
+            .putExtra(BluetoothProfile.EXTRA_STATE, BluetoothProfile.STATE_CONNECTING))
+        assertNull(shadowOf(app).nextStartedService)
+        assertFalse(app.bluetoothStart.state.value.allowed)
+    }
     private val app get() = ApplicationProvider.getApplicationContext<TeslaNaviApp>()
     private val address = "00:11:22:33:44:55"
     private val other = "00:11:22:33:44:66"
