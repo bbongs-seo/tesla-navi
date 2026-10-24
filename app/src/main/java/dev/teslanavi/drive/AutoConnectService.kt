@@ -53,6 +53,7 @@ class AutoConnectService : Service() {
             return START_NOT_STICKY
         }
         running = true
+        app.bluetoothStart.refresh()
         if (app.drive.state.value.active) DriveService.notificationOwnerChanged(this)
         if (monitor?.isActive != true) monitor = scope.launch {
             launch {
@@ -79,6 +80,8 @@ class AutoConnectService : Service() {
             }.distinctUntilChanged()
             combine(app.vehicles.vehicles, app.autoConnect.verified, app.autoConnect.enabled, radio) { profiles, verified, enabled, ready ->
                 MonitorTarget(profiles.map { it.vin }.toSet(), verified, enabled, ready.first, ready.second, ready.third)
+            }.combine(app.bluetoothStart.state) { target, bluetooth ->
+                target.copy(triggerAllowed = bluetooth.allowed, triggerName = bluetooth.selectedNames.takeIf { it.isNotEmpty() })
             }.distinctUntilChanged().collectLatest { target ->
                 app.autoConnect.proximity.update(target.registered, target.verified)
                 when {
@@ -86,6 +89,7 @@ class AutoConnectService : Service() {
                     !target.permissions -> app.autoConnect.report("자동 연결 권한을 확인해 주세요")
                     !target.bluetooth -> app.autoConnect.report("Bluetooth를 켜면 자동 연결을 다시 시작합니다")
                     !target.location -> app.autoConnect.report("휴대폰 위치 기능을 켜면 자동 연결을 다시 시작합니다")
+                    !target.triggerAllowed -> app.autoConnect.report("${target.triggerName ?: "선택한 블루투스 기기"} 연결 대기 · 연결되면 차량을 검색합니다")
                     target.registered.isEmpty() -> app.autoConnect.report("자동 연결할 차량을 등록해 주세요")
                     app.autoConnect.proximity.scanNames.isEmpty() -> app.autoConnect.report("먼저 차량에 앱 키를 등록하고 한 번 연결해 주세요")
                     else -> {
@@ -113,7 +117,7 @@ class AutoConnectService : Service() {
                 val name = result.scanRecord?.deviceName
                 if (name !in names) return
                 scope.launch {
-                    if (!app.autoConnect.enabled.value) return@launch
+                    if (!app.autoConnect.enabled.value || !app.bluetoothStart.state.value.allowed) return@launch
                     // Recheck eligibility because callbacks from an old scan may still be queued.
                     app.autoConnect.proximity.update(app.vehicles.vehicles.value.map { it.vin }.toSet(), app.autoConnect.verified.value)
                     val vin = app.autoConnect.proximity.observe(name, result.rssi, result.isConnectable,
@@ -147,7 +151,8 @@ class AutoConnectService : Service() {
     override fun onDestroy() { running = false; scope.cancel(); super.onDestroy() }
     override fun onBind(intent: Intent?): IBinder? = null
 
-    private data class MonitorTarget(val registered: Set<String>, val verified: Set<String>, val enabled: Boolean, val permissions: Boolean, val bluetooth: Boolean, val location: Boolean)
+    private data class MonitorTarget(val registered: Set<String>, val verified: Set<String>, val enabled: Boolean, val permissions: Boolean, val bluetooth: Boolean, val location: Boolean,
+        val triggerAllowed: Boolean = true, val triggerName: String? = null)
 
     companion object {
         @Volatile var running = false

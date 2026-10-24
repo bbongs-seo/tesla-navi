@@ -17,6 +17,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.selection.toggleable
+import androidx.compose.ui.semantics.Role
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -41,6 +43,8 @@ import dev.teslanavi.drive.DriveService
 import dev.teslanavi.drive.DriveState
 import dev.teslanavi.drive.AutoConnectService
 import dev.teslanavi.drive.AutoConnectSettings
+import dev.teslanavi.drive.BluetoothStartState
+import dev.teslanavi.drive.StartBluetoothDevice
 import dev.teslanavi.protocol.NavigationDestination
 import dev.teslanavi.protocol.VehicleIdentity
 import dev.teslanavi.navigation.*
@@ -62,6 +66,11 @@ class MainActivity : ComponentActivity() {
     private var pendingAutomatic = false
     private val backgroundDisclosure = mutableStateOf(false)
     private val localError = mutableStateOf<String?>(null)
+    private val showBluetooth = mutableStateOf(false)
+    private val bluetoothListPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) {
+        app.bluetoothStart.refresh()
+        showBluetooth.value = true
+    }
     private val permissionLauncher = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
         if (pendingAutomatic && (!granted(Manifest.permission.ACCESS_FINE_LOCATION) ||
                 (Build.VERSION.SDK_INT >= 33 && !granted(Manifest.permission.POST_NOTIFICATIONS)))) {
@@ -97,6 +106,7 @@ class MainActivity : ComponentActivity() {
                 val autoEnabled by app.autoConnect.enabled.collectAsStateWithLifecycle()
                 val autoStatus by app.autoConnect.status.collectAsStateWithLifecycle()
                 val guidanceOptions by app.guidance.options.collectAsStateWithLifecycle()
+                val bluetoothStart by app.bluetoothStart.state.collectAsStateWithLifecycle()
                 var showGuidance by remember { mutableStateOf(false) }
                 Surface(Modifier.fillMaxSize(), color = Ink) {
                     VehicleScreen(profiles, selected, state, cameras, hasKakaoKey, localError.value, autoEnabled, autoStatus, guidanceOptions,
@@ -107,10 +117,24 @@ class MainActivity : ComponentActivity() {
                         onDisconnect = { DriveService.stop(this) },
                         onRefresh = { app.drive.requestRefresh() },
                         onAutomatic = { enabled -> if (enabled) beginAutomatic() else AutoConnectService.disable(this) },
-                        onMute = { app.cameras.setMuted(it) })
+                        onMute = { app.cameras.setMuted(it) },
+                        bluetoothStart = bluetoothStart,
+                        onBluetooth = {
+                            if (Build.VERSION.SDK_INT >= 31 && !granted(Manifest.permission.BLUETOOTH_CONNECT))
+                                bluetoothListPermission.launch(Manifest.permission.BLUETOOTH_CONNECT)
+                            else { app.bluetoothStart.refresh(); showBluetooth.value = true }
+                        })
                 }
                 if (showGuidance) GuidanceSettingsDialog(app.guidance,
                     cameras.phase in setOf(CameraPhase.INITIALIZING, CameraPhase.WAITING_GPS, CameraPhase.GUIDING)) { showGuidance = false }
+                if (showBluetooth.value) BluetoothStartDialog(bluetoothStart,
+                    onRefresh = { app.bluetoothStart.refresh() },
+                    onSystemSettings = { startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS)) },
+                    onSelect = { devices ->
+                        app.bluetoothStart.select(devices)
+                        showBluetooth.value = false
+                        if (devices.isNotEmpty()) beginAutomatic()
+                    }, onDismiss = { showBluetooth.value = false })
                 if (backgroundDisclosure.value) AlertDialog(
                     onDismissRequest = { backgroundDisclosure.value = false; pendingAutomatic = false },
                     title = { Text("자동 연결에 필요한 위치 권한") },
@@ -133,6 +157,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        app.bluetoothStart.refresh()
         if (app.autoConnect.enabled.value && AutoConnectSettings.ready(this)) {
             try { AutoConnectService.start(this) } catch (_: Exception) { app.autoConnect.report("자동 연결을 다시 켜 주세요") }
         }
@@ -203,10 +228,43 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
+private fun BluetoothStartDialog(state: BluetoothStartState, onRefresh: () -> Unit,
+    onSystemSettings: () -> Unit, onSelect: (Map<String, String>) -> Unit, onDismiss: () -> Unit) {
+    var selected by remember { mutableStateOf(state.selectedDevices) }
+    val devices = state.devices + state.selectedDevices.filterKeys { address -> state.devices.none { it.address == address } }
+        .map { (address, name) -> StartBluetoothDevice(address, name, false) }
+    AlertDialog(onDismissRequest = onDismiss, title = { Text("블루투스 자동 시작") },
+        text = {
+            Column(Modifier.heightIn(max = 440.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("휴대폰에 등록된 기기를 여러 개 선택할 수 있습니다. 선택한 기기 중 하나라도 연결되면 차량을 검색하고 주행 시작 후 안내합니다.")
+                Text("자동 연결 스위치가 켜져 있어야 합니다. 앱 화면은 알림을 눌러 열 수 있습니다.", color = Muted, fontSize = 12.sp)
+                Text("선택한 기기 ${selected.size}개", color = Mint)
+                state.message?.let { Text(it, color = Muted) }
+                devices.forEach { device ->
+                    Row(Modifier.fillMaxWidth().toggleable(value = device.address in selected, role = Role.Checkbox,
+                        onValueChange = { checked -> selected = if (checked) selected + (device.address to device.name) else selected - device.address })
+                        .padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(checked = device.address in selected, onCheckedChange = null)
+                        Column(Modifier.weight(1f)) {
+                            Text(device.name)
+                            Text("${if (device.connected) "연결됨" else "등록됨 · 연결 안 됨"} · ${device.address.takeLast(5)}", fontSize = 11.sp)
+                        }
+                    }
+                }
+                TextButton(onClick = { selected = emptyMap() }) { Text("전체 선택 해제 · 차량 접근으로 시작") }
+                TextButton(onClick = onRefresh) { Text("목록 새로고침") }
+                TextButton(onClick = onSystemSettings) { Text("휴대폰 Bluetooth 설정") }
+            }
+        }, confirmButton = { TextButton(onClick = { onSelect(selected) }) { Text("저장") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("취소") } })
+}
+
+@Composable
 private fun VehicleScreen(profiles: List<VehicleProfile>, selected: String?, state: DriveState,
     cameras: CameraState, hasKakaoKey: Boolean, localError: String?, autoEnabled: Boolean, autoStatus: String, options: GuidanceOptions, onSettings: () -> Unit,
     onAdd: (String, String) -> Unit, onSelect: (String) -> Unit, onConnect: (Boolean) -> Unit,
-    onDisconnect: () -> Unit, onRefresh: () -> Unit, onAutomatic: (Boolean) -> Unit, onMute: (Boolean) -> Unit) {
+    onDisconnect: () -> Unit, onRefresh: () -> Unit, onAutomatic: (Boolean) -> Unit, onMute: (Boolean) -> Unit,
+    bluetoothStart: BluetoothStartState, onBluetooth: () -> Unit) {
     var showAdd by remember { mutableStateOf(false) }
     var showEnroll by remember { mutableStateOf(false) }
     var diagnostics by remember { mutableStateOf(false) }
@@ -279,6 +337,9 @@ private fun VehicleScreen(profiles: List<VehicleProfile>, selected: String?, sta
             }
             Text(autoStatus, color = Muted, fontSize = 13.sp)
             Text("키 인증을 마친 등록 차량 중 먼저 감지된 차량에 자동 연결합니다. 각 차량은 처음 한 번 앱 키 등록과 차량 연결이 필요합니다.", color = Muted, fontSize = 11.sp)
+            OutlinedButton(onClick = onBluetooth, modifier = Modifier.fillMaxWidth()) { Text("블루투스 자동 시작 설정") }
+            Text(if (bluetoothStart.selectedDevices.isNotEmpty()) "선택한 기기 ${bluetoothStart.selectedDevices.size}개 중 하나 연결 시 자동 시작 · ${if (bluetoothStart.allowed) "기기 연결됨" else "연결 대기"}"
+                else "블루투스 기기를 선택하면 해당 기기 연결 시 차량을 검색합니다.", color = Muted, fontSize = 12.sp)
             if (autoEnabled) TextButton(onClick = { onAutomatic(true) }) { Text("권한 확인 · 대기 재시작") }
         }
         AppCard {

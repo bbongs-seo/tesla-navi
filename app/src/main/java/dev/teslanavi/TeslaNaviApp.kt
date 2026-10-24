@@ -8,6 +8,7 @@ import dev.teslanavi.drive.AutoConnectSettings
 import dev.teslanavi.navigation.*
 
 class TeslaNaviApp : Application() {
+    val bluetoothStart by lazy { dev.teslanavi.drive.BluetoothStartSettings(this) }
     val vehicles by lazy { VehicleStore(this) }
     val keys by lazy { VehicleKeyStore(this) }
     val drive by lazy { DriveController(this, keys) }

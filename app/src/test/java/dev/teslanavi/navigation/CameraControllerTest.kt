@@ -15,6 +15,88 @@ import org.junit.Test
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class CameraControllerTest {
+    @Test fun failedVoiceRecoversDuringSameDriveWithoutRestartingRouteOrChime() = runTest {
+        val engine = FakeNavigationEngine()
+        val speaker = FakeSpeaker().apply { initializationError = "temporary TTS failure" }
+        val controller = CameraController(engine, speaker) { testScheduler.currentTime }
+        val job = backgroundScope.launch { controller.run("key", MutableStateFlow(connected())) }
+        runCurrent()
+        engine.frame(listOf(camera), 0, speed = 70); runCurrent()
+        assertTrue(speaker.alarm)
+        assertTrue(speaker.spoken.isEmpty())
+        speaker.initializationError = null
+        advanceTimeBy(5001); runCurrent()
+        assertNull(controller.state.value.voiceError)
+        assertTrue(speaker.alarm)
+        engine.frame(listOf(camera), testScheduler.currentTime, speed = 70); runCurrent()
+        assertEquals(1, speaker.spoken.size)
+        assertEquals(2, speaker.initializations)
+        assertEquals(1, engine.destinations.size)
+        // A later TTS service failure also recovers without a destination change.
+        speaker.needsInitialization = true
+        advanceTimeBy(5000); runCurrent()
+        assertEquals(3, speaker.initializations)
+        assertEquals(1, engine.destinations.size)
+        job.cancelAndJoin()
+    }
+
+    @Test fun parkingCancelsVoiceRecoveryInProgress() = runTest {
+        val engine = FakeNavigationEngine()
+        val speaker = FakeSpeaker().apply { initializationError = "temporary TTS failure" }
+        val controller = CameraController(engine, speaker) { testScheduler.currentTime }
+        val drive = MutableStateFlow(connected())
+        val job = backgroundScope.launch { controller.run("key", drive) }
+        runCurrent()
+        val gate = CompletableDeferred<Unit>()
+        speaker.initializationGate = gate
+        speaker.initializationError = null
+        advanceTimeBy(5001); runCurrent()
+        assertEquals(2, speaker.initializations)
+        drive.value = connected(speed = 0.0, gear = Gear.PARK); runCurrent()
+        gate.complete(Unit)
+        advanceTimeBy(30_000); runCurrent()
+        assertEquals(CameraPhase.WAITING_DRIVE, controller.state.value.phase)
+        assertEquals(2, speaker.initializations)
+        assertTrue(speaker.spoken.isEmpty())
+        assertEquals(0, speaker.tripStarts)
+        job.cancelAndJoin()
+    }
+
+    @Test fun asynchronousSpeechFailureDoesNotConsumeCameraOrOverspeedAnnouncement() = runTest {
+        val engine = FakeNavigationEngine()
+        val speaker = FakeSpeaker().apply { deferCompletion = true }
+        val controller = CameraController(engine, speaker) { testScheduler.currentTime }
+        val job = backgroundScope.launch { controller.run("key", MutableStateFlow(connected())) }
+        runCurrent()
+        engine.frame(listOf(camera), 0, speed = 70); runCurrent()
+        engine.frame(listOf(camera), 0, speed = 70); runCurrent()
+        assertEquals(1, speaker.spoken.size)
+        speaker.finish(false)
+        engine.frame(listOf(camera.copy(distanceMeters = 100)), 0, speed = 70); runCurrent()
+        assertEquals(2, speaker.spoken.size)
+        assertTrue(speaker.spoken.last().contains("100미터"))
+        assertTrue(speaker.spoken.last().contains("초과입니다"))
+        speaker.finish(true)
+        engine.frame(listOf(camera), 0, speed = 70); runCurrent()
+        assertEquals(2, speaker.spoken.size)
+        job.cancelAndJoin()
+    }
+
+    @Test fun completionFromPreviousRouteCannotConsumeNewRouteAnnouncement() = runTest {
+        val engine = FakeNavigationEngine()
+        val speaker = FakeSpeaker().apply { deferCompletion = true }
+        val controller = CameraController(engine, speaker) { testScheduler.currentTime }
+        val drive = MutableStateFlow(connected())
+        val job = backgroundScope.launch { controller.run("key", drive) }
+        runCurrent()
+        engine.frame(listOf(camera), 0); runCurrent()
+        drive.value = connected(NavigationDestination.None); runCurrent()
+        speaker.finish(true)
+        engine.frame(listOf(camera), 0); runCurrent()
+        assertEquals(2, speaker.spoken.size)
+        job.cancelAndJoin()
+    }
+
     @Test fun unknownNearbyCameraDoesNotMaskOverspeedCameraEvenBeyondDisplayLimit() = runTest {
         val engine = FakeNavigationEngine()
         val speaker = FakeSpeaker()
@@ -456,6 +538,17 @@ private class FakeNavigationEngine : CameraNavigationEngine {
 }
 
 private class FakeSpeaker : CameraSpeaker {
+    override var needsInitialization = false
+    var initializations = 0
+    var initializationGate: Deferred<Unit>? = null
+    var deferCompletion = false
+    private var completion: ((Boolean) -> Unit)? = null
+    fun finish(success: Boolean) { val callback = completion; completion = null; callback?.invoke(success) }
+    override fun speak(text: String, onComplete: (Boolean) -> Unit): Boolean {
+        if (completion != null || !speak(text)) return false
+        if (deferCompletion) completion = onComplete else onComplete(true)
+        return true
+    }
     val spoken = mutableListOf<String>()
     var tripStarts = 0
     var alarm = false
@@ -463,7 +556,12 @@ private class FakeSpeaker : CameraSpeaker {
     var acceptsAudio = true
     var closed = false
     var initializationError: String? = null
-    override suspend fun initialize(): String? = initializationError
+    override suspend fun initialize(): String? {
+        initializations++
+        initializationGate?.await()
+        needsInitialization = initializationError != null
+        return initializationError
+    }
     override fun speak(text: String): Boolean { if (acceptsAudio) { if (text == "주행시작") tripStarts++ else spoken += text }; return acceptsAudio }
     override fun silence() = Unit
     override fun close() { closed = true }

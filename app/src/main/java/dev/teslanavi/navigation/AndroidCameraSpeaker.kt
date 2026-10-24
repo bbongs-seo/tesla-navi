@@ -9,6 +9,7 @@ import android.media.AudioFormat
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import kotlinx.coroutines.CompletableDeferred
@@ -24,6 +25,18 @@ class AndroidCameraSpeaker(private val context: Context) : CameraSpeaker {
     private var alarm = false
     private var track: AudioTrack? = null
     private var gain = 1f
+    override var needsInitialization = true
+        private set
+    private var completion: ((Boolean) -> Unit)? = null
+    private var retryAfter = 0L
+    private val speechTimeout = Runnable {
+        utterance?.let { id ->
+            record("speech timeout id=$id")
+            needsInitialization = true
+            finishCurrent(false)
+            tts?.stop()
+        }
+    }
     private val alarmLoop = object : Runnable {
         override fun run() {
             if (!alarm) return
@@ -50,41 +63,92 @@ class AndroidCameraSpeaker(private val context: Context) : CameraSpeaker {
         .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build()
 
     override suspend fun initialize(): String? {
-        close()
+        // Rebuilding TTS must not stop the independently playing overspeed chime.
+        stopSpeech()
+        tts?.shutdown()
+        tts = null
+        needsInitialization = true
+        record("tts init start")
         val status = CompletableDeferred<Int>()
-        tts = TextToSpeech(context.applicationContext) { status.complete(it) }
-        if (withTimeoutOrNull(7000) { status.await() } != TextToSpeech.SUCCESS) {
-            close(); return "음성 엔진을 시작하지 못했습니다. 화면으로 카메라 정보를 확인해 주세요."
+        try {
+            tts = TextToSpeech(context.applicationContext) { status.complete(it) }
+            val result = withTimeoutOrNull(7000) { status.await() }
+            record("tts init result=$result")
+            if (result != TextToSpeech.SUCCESS) {
+                return "음성 엔진을 시작하지 못했습니다. 자동으로 다시 시도합니다."
+            }
+            val engine = checkNotNull(tts)
+            val language = engine.setLanguage(Locale.KOREAN)
+            record("tts language=$language engine=${engine.defaultEngine}")
+            if (language < 0) return "휴대폰에 한국어 TTS 음성 데이터를 설치해 주세요."
+            check(engine.setAudioAttributes(attributes) == TextToSpeech.SUCCESS)
+            engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                override fun onStart(id: String?) { handler.post {
+                    if (id == utterance) {
+                        record("speech start id=$id")
+                        handler.removeCallbacks(speechTimeout)
+                        handler.postDelayed(speechTimeout, 30_000)
+                    }
+                } }
+                override fun onDone(id: String?) { finished(id, true, "done") }
+                override fun onStop(id: String?, interrupted: Boolean) { finished(id, false, "stop") }
+                @Deprecated("Required by the Android TTS API")
+                override fun onError(id: String?) { finished(id, false, "error", rebuild = true) }
+                override fun onError(id: String?, errorCode: Int) { finished(id, false, "error=$errorCode", rebuild = true) }
+            })
+            needsInitialization = false
+            retryAfter = 0
+            return null
+        } finally {
+            if (needsInitialization) { tts?.shutdown(); tts = null }
         }
-        val engine = checkNotNull(tts)
-        val language = engine.setLanguage(Locale.KOREAN)
-        if (language < 0) { close(); return "휴대폰에 한국어 TTS 음성 데이터를 설치해 주세요." }
-        engine.setAudioAttributes(attributes)
-        engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-            override fun onStart(id: String?) = Unit
-            override fun onDone(id: String?) { finished(id) }
-            override fun onStop(id: String?, interrupted: Boolean) { finished(id) }
-            @Deprecated("Required by the Android TTS API")
-            override fun onError(id: String?) { finished(id) }
-            override fun onError(id: String?, errorCode: Int) { finished(id) }
-        })
-        return null
     }
 
-    private fun finished(id: String?) { handler.post {
-        if (id == utterance) { utterance = null; if (!alarm) releaseFocus() }
+    private fun record(event: String) = AudioDiagnostics.record(context, event)
+
+    private fun finished(id: String?, success: Boolean, result: String, rebuild: Boolean = false) { handler.post {
+        if (id != null && id == utterance) {
+            record("speech $result id=$id")
+            if (rebuild) needsInitialization = true
+            finishCurrent(success)
+        }
     } }
 
-    override fun speak(text: String): Boolean {
+    private fun finishCurrent(success: Boolean) {
+        handler.removeCallbacks(speechTimeout)
+        utterance = null
+        val callback = completion
+        completion = null
+        if (!success) retryAfter = SystemClock.elapsedRealtime() + 2000
+        if (!alarm) releaseFocus()
+        callback?.invoke(success)
+    }
+
+    override fun speak(text: String): Boolean = speak(text) {}
+
+    override fun speak(text: String, onComplete: (Boolean) -> Unit): Boolean {
         val engine = tts ?: return false
-        if (utterance != null || gain == 0f) return false
+        if (needsInitialization || utterance != null || gain == 0f || SystemClock.elapsedRealtime() < retryAfter) return false
         track?.pause()
-        if (!acquireFocus()) return false
+        if (!acquireFocus()) {
+            retryAfter = SystemClock.elapsedRealtime() + 2000
+            record("speech focus denied")
+            return false
+        }
         val id = UUID.randomUUID().toString()
         utterance = id
-        if (engine.speak(text, TextToSpeech.QUEUE_FLUSH, Bundle().apply { putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, gain) }, id) != TextToSpeech.SUCCESS) {
-            utterance = null; releaseFocus(); return false
+        completion = onComplete
+        record("speech requested id=$id gain=$gain musicVolume=${audio.getStreamVolume(AudioManager.STREAM_MUSIC)}")
+        val result = runCatching {
+            engine.speak(text, TextToSpeech.QUEUE_FLUSH, Bundle().apply { putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, gain) }, id)
+        }.getOrDefault(TextToSpeech.ERROR)
+        if (result != TextToSpeech.SUCCESS) {
+            record("speech rejected id=$id result=$result")
+            needsInitialization = true
+            finishCurrent(false)
+            return false
         }
+        handler.postDelayed(speechTimeout, 10_000)
         return true
     }
 
@@ -93,6 +157,7 @@ class AndroidCameraSpeaker(private val context: Context) : CameraSpeaker {
         val request = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
             .setAudioAttributes(attributes).setOnAudioFocusChangeListener({ change ->
                 if (change == AudioManager.AUDIOFOCUS_LOSS || change == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT) {
+                    record("audio focus lost change=$change")
                     setOverSpeedAlert(false); silence()
                 }
             }, handler).build()
@@ -116,10 +181,19 @@ class AndroidCameraSpeaker(private val context: Context) : CameraSpeaker {
         else { track?.pause(); track?.release(); track = null; if (utterance == null) releaseFocus() }
     }
 
-    override fun silence() { setOverSpeedAlert(false); utterance = null; tts?.stop(); releaseFocus() }
+    private fun stopSpeech() {
+        handler.removeCallbacks(speechTimeout)
+        utterance = null
+        val callback = completion
+        completion = null
+        tts?.stop()
+        callback?.invoke(false)
+        if (!alarm) releaseFocus()
+    }
+    override fun silence() { setOverSpeedAlert(false); stopSpeech(); releaseFocus() }
     private fun releaseFocus() {
         focus?.let { audio.abandonAudioFocusRequest(it) }; focus = null
 
     }
-    override fun close() { silence(); tts?.shutdown(); tts = null }
+    override fun close() { silence(); tts?.shutdown(); tts = null; needsInitialization = true }
 }

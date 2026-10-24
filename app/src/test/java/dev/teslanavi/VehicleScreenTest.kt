@@ -21,6 +21,35 @@ import java.io.File
 class VehicleScreenTest {
     @get:Rule val compose = createAndroidComposeRule<MainActivity>()
 
+    @Test fun bluetoothStartListCanBeOpenedAndSelectionCleared() {
+        org.robolectric.Shadows.shadowOf(ApplicationProvider.getApplicationContext<TeslaNaviApp>())
+            .grantPermissions(android.Manifest.permission.BLUETOOTH_CONNECT)
+        compose.onNodeWithText("블루투스 자동 시작 설정").performScrollTo().performClick()
+        compose.onNodeWithText("블루투스 자동 시작").assertExists()
+        compose.onNodeWithText("휴대폰 Bluetooth 설정").assertExists()
+        compose.onNodeWithText("전체 선택 해제 · 차량 접근으로 시작").performClick()
+        compose.onNodeWithText("저장").performClick()
+        compose.onNodeWithText("블루투스 자동 시작").assertDoesNotExist()
+    }
+
+    @Test fun multipleBluetoothChoicesAreSavedTogetherAndCancelPreservesSelection() {
+        val app = ApplicationProvider.getApplicationContext<TeslaNaviApp>()
+        org.robolectric.Shadows.shadowOf(app).grantPermissions(android.Manifest.permission.BLUETOOTH_CONNECT)
+        app.bluetoothStart.select(mapOf("00:11:22:33:44:55" to "Car A", "00:11:22:33:44:66" to "Car B"))
+        compose.onNodeWithText("블루투스 자동 시작 설정").performScrollTo().performClick()
+        compose.onNodeWithText("선택한 기기 2개").assertExists()
+        compose.onNodeWithText("Car A").performClick()
+        compose.onNodeWithText("선택한 기기 1개").assertExists()
+        compose.onNodeWithText("취소").performClick()
+        org.junit.Assert.assertEquals(2, app.bluetoothStart.state.value.selectedDevices.size)
+        compose.onNodeWithText("블루투스 자동 시작 설정").performScrollTo().performClick()
+        compose.onNodeWithText("Car B").performClick()
+        compose.onNodeWithText("Car A").performClick()
+        compose.onNodeWithText("Car B").performClick()
+        compose.onNodeWithText("저장").performClick()
+        org.junit.Assert.assertEquals(mapOf("00:11:22:33:44:66" to "Car B"), app.bluetoothStart.state.value.selectedDevices)
+    }
+
     @Test fun soundChecksAreAvailableWithoutVehicleAndExplainZeroVolume() {
         compose.onNodeWithText("안내 설정").performClick()
         compose.onNodeWithText("카메라 음성 테스트").assertIsEnabled()

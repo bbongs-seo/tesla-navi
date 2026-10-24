@@ -37,8 +37,15 @@ interface CameraNavigationEngine {
 data class NavigationUpdate(val revision: Long, val event: NavigationEvent)
 
 interface CameraSpeaker {
+    val needsInitialization: Boolean get() = false
     suspend fun initialize(): String?
     fun speak(text: String): Boolean
+    /** Completion is delivered on the caller's main thread; acceptance alone is not playback. */
+    fun speak(text: String, onComplete: (Boolean) -> Unit): Boolean {
+        val accepted = speak(text)
+        if (accepted) onComplete(true)
+        return accepted
+    }
     fun setOverSpeedAlert(active: Boolean) {}
     fun setVolume(percent: Int) {}
     fun silence()
@@ -61,7 +68,7 @@ data class CameraState(
     val overSpeedCamera: CameraReading? = null,
 )
 
-/** One presence announcement per camera; commit only after audio was accepted. */
+/** One presence announcement per camera; commit only after speech completed. */
 class CameraAlertPolicy {
     data class Announcement(val cameraId: String, val text: String, val atMillis: Long)
     private val announced = linkedMapOf<String, Long>()

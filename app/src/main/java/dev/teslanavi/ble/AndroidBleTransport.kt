@@ -25,6 +25,7 @@ import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.ensureActive
 import java.io.IOException
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicLong
 
 @SuppressLint("MissingPermission")
 class AndroidBleTransport private constructor(private val context: Context) : VehicleTransport {
@@ -40,6 +41,14 @@ class AndroidBleTransport private constructor(private val context: Context) : Ve
     @Volatile private var closed = false
     private var tx: BluetoothGattCharacteristic? = null
     private var mtu = 23
+    private val receivedChunks = AtomicLong()
+    private val receivedMessages = AtomicLong()
+    private val lastReceivedAt = AtomicLong()
+    override fun diagnostics(): String {
+        val last = lastReceivedAt.get()
+        val age = if (receivedChunks.get() == 0L) "없음" else "${SystemClock.elapsedRealtime() - last}ms"
+        return "MTU=$mtu, 수신조각=${receivedChunks.get()}, 완성메시지=${receivedMessages.get()}, 마지막수신=$age"
+    }
 
     private val callback = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
@@ -77,8 +86,11 @@ class AndroidBleTransport private constructor(private val context: Context) : Ve
 
     private fun receive(chunk: ByteArray) {
         if (closed) return
+        receivedChunks.incrementAndGet()
+        lastReceivedAt.set(SystemClock.elapsedRealtime())
         try {
             for (message in framing.accept(chunk, SystemClock.elapsedRealtime())) {
+                receivedMessages.incrementAndGet()
                 if (!incoming.trySend(message).isSuccess) throw IOException("차량 응답 처리가 지연되었습니다. 다시 연결해 주세요.")
             }
         } catch (error: Exception) {
@@ -109,10 +121,12 @@ class AndroidBleTransport private constructor(private val context: Context) : Ve
         val rx = service.getCharacteristic(RX) ?: error("차량 수신 채널이 없습니다.")
         onStatus("차량 메시지 채널 설정 중")
         if (connection.requestMtu(512)) mtu = connectionStep(8000, "Bluetooth 전송 크기 협상 시간이 초과되었습니다.") { negotiatedMtu.await() }.coerceAtLeast(23)
+        onStatus("Bluetooth 전송 크기 확인 · MTU $mtu")
         check(connection.setCharacteristicNotification(rx, true)) { "차량 알림을 활성화하지 못했습니다." }
         val descriptor = rx.getDescriptor(CCCD) ?: error("차량 알림 설정을 찾지 못했습니다.")
         val value = if (rx.properties and BluetoothGattCharacteristic.PROPERTY_INDICATE != 0)
             BluetoothGattDescriptor.ENABLE_INDICATION_VALUE else BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+        onStatus("차량 응답 알림 구독 중 · RX 속성 ${rx.properties}")
         val accepted = if (Build.VERSION.SDK_INT >= 33) connection.writeDescriptor(descriptor, value) == BluetoothStatusCodes.SUCCESS
             else { descriptor.value = value; connection.writeDescriptor(descriptor) }
         check(accepted) { "차량 알림 구독을 시작하지 못했습니다." }
@@ -131,7 +145,7 @@ class AndroidBleTransport private constructor(private val context: Context) : Ve
             try {
                 var writeCode = 0
                 val accepted = if (Build.VERSION.SDK_INT >= 33) {
-                    writeCode = connection.writeCharacteristic(characteristic, chunk, writeType)
+                    writeCode = retryBusyGattWrite { connection.writeCharacteristic(characteristic, chunk, writeType) }
                     writeCode == BluetoothStatusCodes.SUCCESS
                 }
                 else {

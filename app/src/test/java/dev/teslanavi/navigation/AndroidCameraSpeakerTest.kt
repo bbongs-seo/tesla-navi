@@ -43,6 +43,7 @@ class AndroidCameraSpeakerTest {
             assertNull(trackOf(speaker))
             speech.utteranceProgressListener.onStop(speech.lastId, true)
             shadowOf(Looper.getMainLooper()).idle()
+            shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(2000))
             assertTrue(speaker.speak("제한속도 60킬로미터 초과입니다"))
             speech.utteranceProgressListener.onDone(speech.lastId)
             shadowOf(Looper.getMainLooper()).idle()
@@ -81,7 +82,65 @@ class AndroidCameraSpeakerTest {
             assertFalse(speaker.speak("겹치는 안내"))
             speech.utteranceProgressListener.onStop(speech.lastId, false)
             shadowOf(Looper.getMainLooper()).idle()
+            shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(2000))
             assertTrue(speaker.speak("다음 안내"))
+        } finally { speaker.close() }
+    }
+
+    @Test fun asynchronousErrorReportsFailureAndReinitializationPreservesChime() = runTest {
+        val context = ApplicationProvider.getApplicationContext<TeslaNaviApp>()
+        shadowOf(context.getSystemService(AudioManager::class.java))
+            .setNextFocusRequestResponse(AudioManager.AUDIOFOCUS_REQUEST_GRANTED)
+        ShadowTextToSpeech.addLanguageAvailability(Locale.KOREAN)
+        val speaker = AndroidCameraSpeaker(context)
+        val initialization = async(start = CoroutineStart.UNDISPATCHED) { speaker.initialize() }
+        val speech = shadowOf(ShadowTextToSpeech.getLastTextToSpeechInstance()) as ControlledSpeech
+        speech.onInitListener.onInit(TextToSpeech.SUCCESS)
+        assertNull(initialization.await())
+        try {
+            val results = mutableListOf<Boolean>()
+            assertTrue(speaker.speak("카메라 안내") { results += it })
+            assertTrue(results.isEmpty())
+            speaker.setOverSpeedAlert(true)
+            speech.utteranceProgressListener.onError(speech.lastId, TextToSpeech.ERROR_OUTPUT)
+            shadowOf(Looper.getMainLooper()).idle()
+            assertEquals(listOf(false), results)
+            assertTrue(speaker.needsInitialization)
+            val recovery = async(start = CoroutineStart.UNDISPATCHED) { speaker.initialize() }
+            shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(2000))
+            assertEquals(AudioTrack.PLAYSTATE_PLAYING, checkNotNull(trackOf(speaker)).playState)
+            val recovered = shadowOf(ShadowTextToSpeech.getLastTextToSpeechInstance()) as ControlledSpeech
+            recovered.onInitListener.onInit(TextToSpeech.SUCCESS)
+            assertNull(recovery.await())
+            assertFalse(speaker.needsInitialization)
+            assertTrue(speaker.speak("다시 안내") { results += it })
+            recovered.utteranceProgressListener.onDone(recovered.lastId)
+            shadowOf(Looper.getMainLooper()).idle()
+            assertEquals(listOf(false, true), results)
+        } finally { speaker.close() }
+    }
+
+    @Test fun missingTtsCallbackTimesOutAndReleasesChime() = runTest {
+        val context = ApplicationProvider.getApplicationContext<TeslaNaviApp>()
+        shadowOf(context.getSystemService(AudioManager::class.java))
+            .setNextFocusRequestResponse(AudioManager.AUDIOFOCUS_REQUEST_GRANTED)
+        ShadowTextToSpeech.addLanguageAvailability(Locale.KOREAN)
+        val speaker = AndroidCameraSpeaker(context)
+        val initialization = async(start = CoroutineStart.UNDISPATCHED) { speaker.initialize() }
+        val speech = shadowOf(ShadowTextToSpeech.getLastTextToSpeechInstance()) as ControlledSpeech
+        speech.onInitListener.onInit(TextToSpeech.SUCCESS)
+        assertNull(initialization.await())
+        try {
+            val results = mutableListOf<Boolean>()
+            assertTrue(speaker.speak("카메라 안내") { results += it })
+            speaker.setOverSpeedAlert(true)
+            shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(12_000))
+            assertEquals(listOf(false), results)
+            assertTrue(speaker.needsInitialization)
+            assertEquals(AudioTrack.PLAYSTATE_PLAYING, checkNotNull(trackOf(speaker)).playState)
+            speech.utteranceProgressListener.onDone(speech.lastId)
+            shadowOf(Looper.getMainLooper()).idle()
+            assertEquals(listOf(false), results)
         } finally { speaker.close() }
     }
 

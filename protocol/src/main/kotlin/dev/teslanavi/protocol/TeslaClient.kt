@@ -15,12 +15,16 @@ import kotlinx.coroutines.channels.ReceiveChannel
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import java.security.KeyPair
 
 interface VehicleTransport {
     val incoming: ReceiveChannel<ByteArray>
     suspend fun send(message: ByteArray)
     fun close()
+    fun diagnostics(): String = ""
 }
 
 class VehicleFault(val code: Int) : Exception(when (code) {
@@ -33,7 +37,8 @@ class VehicleFault(val code: Int) : Exception(when (code) {
 })
 
 /** One serialized request at a time; no unrelated or unauthenticated response becomes vehicle data. */
-class TeslaClient(private val vin: String, private val keys: KeyPair, private val transport: VehicleTransport) {
+class TeslaClient(private val vin: String, private val keys: KeyPair, private val transport: VehicleTransport,
+    private val diagnostic: (String) -> Unit = {}) {
     private val mutex = Mutex()
     private var session: TeslaSession? = null
     private var enrollmentPending = false
@@ -103,10 +108,16 @@ class TeslaClient(private val vin: String, private val keys: KeyPair, private va
         .setUuid(randomBytes(16).bytes())
 
     private suspend fun awaitReply(request: RoutableMessage, timeoutMs: Long,
-        accept: (RoutableMessage) -> Boolean): RoutableMessage = withTimeout(timeoutMs) {
+        accept: (RoutableMessage) -> Boolean): RoutableMessage {
+        var received = 0
+        var malformed = 0
+        var unrelated = 0
+        var empty = 0
+        try { return withTimeout(timeoutMs) {
         while (true) {
             val bytes = transport.incoming.receive()
-            val response = try { RoutableMessage.parseFrom(bytes) } catch (_: Exception) { continue }
+            received++
+            val response = try { RoutableMessage.parseFrom(bytes) } catch (_: Exception) { malformed++; continue }
             if (enrollmentPending) {
                 // Legacy enrollment is sent without a routing envelope. Some replies are raw
                 // VCSEC; routed replies must originate from VCSEC and target this connection.
@@ -119,12 +130,19 @@ class TeslaClient(private val vin: String, private val keys: KeyPair, private va
                 enrollmentPayload?.let { enrollmentFailure(it)?.let { error -> throw error } }
             }
             if (response.requestUuid != request.uuid || response.toDestination.routingAddress != address ||
-                response.fromDestination.domain != Domain.DOMAIN_INFOTAINMENT) continue
+                response.fromDestination.domain != Domain.DOMAIN_INFOTAINMENT) { unrelated++; continue }
             val fault = response.signedMessageStatus.signedMessageFaultValue
             if (fault != 0) throw VehicleFault(fault)
             if (accept(response)) return@withTimeout response
+            empty++
         }
         @Suppress("UNREACHABLE_CODE") error("응답 없음")
+        } } catch (error: TimeoutCancellationException) {
+            currentCoroutineContext().ensureActive()
+            val stage = if (request.hasSessionInfoRequest()) "차량 인증" else "주행 정보"
+            diagnostic("$stage 응답 시간 초과 · 수신=$received, 형식오류=$malformed, 다른요청=$unrelated, 내용없음=$empty · ${transport.diagnostics()}")
+            throw error
+        }
     }
 
     fun close() { session = null; transport.close() }

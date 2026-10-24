@@ -21,6 +21,7 @@ class CameraController(
     private var tripAnnounced = false
     private var pendingTrip = false
     private var acceptingFrames = false
+    private var audioGeneration = 0L
 
     fun configured(hasKey: Boolean) {
         _state.value = CameraState(phase = if (hasKey) CameraPhase.IDLE else CameraPhase.KEY_REQUIRED,
@@ -30,7 +31,7 @@ class CameraController(
 
     fun setMuted(muted: Boolean) {
         _state.update { it.copy(muted = muted) }
-        if (muted) { speaker.setOverSpeedAlert(false); speaker.silence() }
+        if (muted) { audioGeneration++; speaker.setOverSpeedAlert(false); speaker.silence() }
     }
 
     fun blocked(message: String) {
@@ -39,6 +40,7 @@ class CameraController(
     }
 
     private fun invalidate() {
+        audioGeneration++
         acceptingFrames = false
         policy.clear()
         overSpeedPolicy.clear()
@@ -58,6 +60,15 @@ class CameraController(
                 }
                 val movement = TripMotionGate()
                 var initialized = false
+                var voiceInitialized = false
+                suspend fun initializeVoice() {
+                    _state.update { it.copy(voiceError = "음성 안내를 준비하고 있습니다. 경고음은 계속 제공합니다.") }
+                    val error = try { speaker.initialize() }
+                    catch (error: CancellationException) { throw error }
+                    catch (_: Exception) { "음성 엔진을 시작하지 못했습니다. 자동으로 다시 시도합니다." }
+                    _state.update { it.copy(voiceError = error) }
+                    voiceInitialized = error == null
+                }
                 launch(start = CoroutineStart.UNDISPATCHED) {
                     engine.events.collect { update ->
                         if (!acceptingFrames || update.revision != engine.revision) return@collect
@@ -65,6 +76,7 @@ class CameraController(
                         when (event) {
                             is NavigationEvent.Mode -> {
                                 if (_state.value.mode != event.mode) {
+                                    audioGeneration++
                                     policy.clear(); overSpeedPolicy.clear(); speaker.setOverSpeedAlert(false); speaker.silence()
                                     _state.update { it.copy(cameras = emptyList(), locationAtMillis = null,
                                         currentSpeedKph = null, roadClass = RoadClass.UNKNOWN, overSpeed = false, overSpeedCamera = null) }
@@ -72,6 +84,7 @@ class CameraController(
                                 _state.update { it.copy(mode = event.mode, message = event.message) }
                             }
                             is NavigationEvent.RouteInvalidated -> {
+                                audioGeneration++
                                 policy.clear(); overSpeedPolicy.clear(); speaker.setOverSpeedAlert(false); speaker.silence()
                                 _state.update { it.copy(cameras = emptyList(), locationAtMillis = null,
                                     phase = CameraPhase.WAITING_GPS, message = event.message,
@@ -102,9 +115,12 @@ class CameraController(
                                         speedWarning == null || it.cameraId == speedCamera?.id
                                     }
                                     val text = listOfNotNull(presenceWithWarning?.text, speedWarning?.text).joinToString(" ")
-                                    if (text.isNotBlank() && speaker.speak(text)) {
-                                        presenceWithWarning?.let(policy::commit)
-                                        speedWarning?.let(overSpeedPolicy::commit)
+                                    val generation = audioGeneration
+                                    if (text.isNotBlank()) speaker.speak(text) { completed ->
+                                        if (completed && acceptingFrames && generation == audioGeneration) {
+                                            presenceWithWarning?.let(policy::commit)
+                                            speedWarning?.let(overSpeedPolicy::commit)
+                                        }
                                     }
                                 }
                             }
@@ -114,8 +130,13 @@ class CameraController(
                 launch {
                     while (isActive) {
                         delay(1000)
-                        if (pendingTrip && acceptingFrames && !_state.value.muted && _state.value.voiceError == null && speaker.speak("주행시작")) {
-                            pendingTrip = false; tripAnnounced = true
+                        if (pendingTrip && acceptingFrames && !_state.value.muted && _state.value.voiceError == null) {
+                            val generation = audioGeneration
+                            speaker.speak("주행시작") { completed ->
+                                if (completed && acceptingFrames && generation == audioGeneration) {
+                                    pendingTrip = false; tripAnnounced = true
+                                }
+                            }
                         }
                         if (_state.value.locationAtMillis?.let { clock() - it > 10000 } == true) {
                             speaker.setOverSpeedAlert(false); speaker.silence()
@@ -144,15 +165,12 @@ class CameraController(
                         var failures = 0
                         while (currentCoroutineContext().isActive) {
                             try {
-                                if (!initialized || _state.value.voiceError != null) {
+                                if (!initialized) {
                                     _state.update { it.copy(phase = CameraPhase.INITIALIZING, message = "카카오내비를 준비하고 있습니다", error = null) }
                                     engine.initialize(nativeKey)
-                                    val voiceError = try { speaker.initialize() }
-                                    catch (error: CancellationException) { throw error }
-                                    catch (_: Exception) { "음성 엔진을 시작하지 못했습니다. 경고음은 계속 제공합니다." }
-                                    _state.update { it.copy(voiceError = voiceError) }
                                     initialized = true
                                 }
+                                if (!voiceInitialized || speaker.needsInitialization) initializeVoice()
                                 pendingTrip = !tripAnnounced
                                 acceptingFrames = true
                                 _state.update { it.copy(phase = CameraPhase.WAITING_GPS, message = "현재 위치를 확인하고 있습니다", error = null) }
@@ -169,6 +187,11 @@ class CameraController(
                                     error = error.message?.take(240)) }
                                 delay(waitSeconds * 1000L)
                             }
+                        }
+                        // Owned by this drive target: parking/disconnection cancels an in-flight retry.
+                        while (currentCoroutineContext().isActive) {
+                            delay(5000)
+                            if (!voiceInitialized || speaker.needsInitialization) initializeVoice()
                         }
                     }
                 }

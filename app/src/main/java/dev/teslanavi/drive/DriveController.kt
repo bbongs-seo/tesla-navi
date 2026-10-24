@@ -73,7 +73,7 @@ class DriveController(private val context: Context, private val keyStore: Vehicl
             var client: TeslaClient? = null
             try {
                 val transport = AndroidBleTransport.connect(context, profile.vin) { status(it) }
-                client = TeslaClient(profile.vin, keys, transport)
+                client = TeslaClient(profile.vin, keys, transport) { message -> status(message) }
                 if (!enrolled) {
                     if (!enrollmentSent) {
                         client.requestKeyEnrollment()
@@ -101,20 +101,16 @@ class DriveController(private val context: Context, private val keyStore: Vehicl
                 }
                 status("목적지 확인 중", DrivePhase.CONNECTED)
                 (context.applicationContext as TeslaNaviApp).autoConnect.verified(profile.vin)
-                var missedReads = 0
+                val reader = DriveStateReader(client::readDriveState, client::authenticate) { status(it) }
+                var firstSnapshot = true
                 while (currentCoroutineContext().isActive) {
-                    val snapshot = try {
-                        client.readDriveState().also { missedReads = 0 }
-                    } catch (error: TimeoutCancellationException) {
-                        currentCoroutineContext().ensureActive()
-                        missedReads++
-                        status("주행 정보 응답 누락 ($missedReads/3) · BLE 연결 유지 후 재조회")
-                        if (missedReads >= 3) throw error
-                        delay(1000)
-                        continue
-                    }
+                    val snapshot = reader.next()
                     val previous = _state.value.snapshot?.destination
                     _state.update { it.copy(snapshot = snapshot, updatedAt = System.currentTimeMillis(), error = null) }
+                    if (firstSnapshot) {
+                        status("주행 정보 수신 · 기어 ${snapshot.gear} · 속도 ${snapshot.speedKph?.toInt() ?: "미제공"} km/h")
+                        firstSnapshot = false
+                    }
                     if (previous != snapshot.destination) status(when (snapshot.destination) {
                         NavigationDestination.None -> "차량에 설정된 목적지가 없습니다"
                         is NavigationDestination.Active -> "차량 목적지를 확인했습니다"
