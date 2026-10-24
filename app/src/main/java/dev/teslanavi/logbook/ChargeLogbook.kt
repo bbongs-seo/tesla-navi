@@ -12,7 +12,11 @@ const val DEFAULT_WON_PER_KWH = 295
 
 enum class EntrySource { AUTO, MANUAL }
 
-data class ChargeEntry(val id: String, val timeMs: Long, val odometerKm: Double, val energyKwh: Double, val source: EntrySource)
+/** [wonPerKwh] is this charge's own rate; null follows the default rate in the settings. */
+data class ChargeEntry(val id: String, val timeMs: Long, val odometerKm: Double, val energyKwh: Double, val source: EntrySource,
+    val wonPerKwh: Int? = null) {
+    fun rate(defaultWonPerKwh: Int): Int = wonPerKwh ?: defaultWonPerKwh
+}
 
 /** Gas-logbook convention: a charge refills what was used since the previous charge. */
 data class ChargeInterval(val entry: ChargeEntry, val distanceKm: Double?, val kmPerKwh: Double?, val wonPerKm: Double?)
@@ -24,29 +28,31 @@ data class LogbookSummary(val intervals: List<ChargeInterval>, val distanceKm: D
     val measuredCount: Int get() = intervals.count { it.kmPerKwh != null }
 }
 
-data class MonthGroup(val month: YearMonth, val intervals: List<ChargeInterval>) {
-    val energyKwh: Double get() = intervals.sumOf { it.entry.energyKwh }
-}
+data class MonthGroup<T>(val month: YearMonth, val items: List<T>)
+
+/** Keeps the given order; a backfilled item joins its month's existing group instead of opening a new one. */
+fun <T> groupByMonth(items: List<T>, zone: ZoneId, timeMs: (T) -> Long): List<MonthGroup<T>> =
+    items.groupBy { YearMonth.from(Instant.ofEpochMilli(timeMs(it)).atZone(zone)) }.map { (month, grouped) -> MonthGroup(month, grouped) }
 
 object ChargeLogbook {
-    /** Keeps the given order; a backfilled entry joins its month's existing group instead of opening a new one. */
-    fun byMonth(intervals: List<ChargeInterval>, zone: ZoneId): List<MonthGroup> =
-        intervals.groupBy { YearMonth.from(Instant.ofEpochMilli(it.entry.timeMs).atZone(zone)) }.map { (month, items) -> MonthGroup(month, items) }
-
     fun sorted(entries: List<ChargeEntry>) = entries.sortedWith(compareBy({ it.odometerKm }, { it.timeMs }))
 
+    /** Each charge is priced at its own rate when set, otherwise at [wonPerKwh]. */
     fun summarize(entries: List<ChargeEntry>, wonPerKwh: Int): LogbookSummary {
         val ordered = sorted(entries)
         val intervals = ordered.mapIndexed { index, entry ->
             val distance = ordered.getOrNull(index - 1)?.let { entry.odometerKm - it.odometerKm }
             val efficiency = distance?.takeIf { it > 0 && entry.energyKwh > 0 }?.let { it / entry.energyKwh }
-            ChargeInterval(entry, distance, efficiency, efficiency?.let { wonPerKwh / it })
+            ChargeInterval(entry, distance, efficiency, efficiency?.let { entry.rate(wonPerKwh) / it })
         }
         val distance = if (ordered.size < 2) 0.0 else ordered.last().odometerKm - ordered.first().odometerKm
-        val energy = ordered.drop(1).sumOf { it.energyKwh }
+        val charged = ordered.drop(1)
+        val energy = charged.sumOf { it.energyKwh }
         val efficiency = distance.takeIf { it > 0 && energy > 0 }?.let { it / energy }
-        return LogbookSummary(intervals, distance, energy, efficiency, efficiency?.let { wonPerKwh / it })
+        return LogbookSummary(intervals, distance, energy, efficiency, efficiency?.let { cost(charged, wonPerKwh) / distance })
     }
+
+    fun cost(entries: List<ChargeEntry>, wonPerKwh: Int): Double = entries.sumOf { it.energyKwh * it.rate(wonPerKwh) }
 }
 
 /** Last unplugged charge reading seen for a vehicle; the baseline for spotting the next session. */

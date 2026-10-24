@@ -22,7 +22,7 @@ class LogbookStore(context: Context, private val clock: () -> Long = System::cur
             (0 until array.length()).map { array.getJSONObject(it) }.mapNotNull { item ->
                 runCatching {
                     ChargeEntry(item.getString("id"), item.getLong("time"), item.getDouble("odometer"), item.getDouble("kwh"),
-                        EntrySource.valueOf(item.getString("source")))
+                        EntrySource.valueOf(item.getString("source")), if (item.has("rate")) item.getInt("rate").takeIf { it in RATE_RANGE } else null)
                 }.getOrNull()?.takeIf { valid(it.odometerKm, it.energyKwh) }
             }
         }
@@ -46,6 +46,12 @@ class LogbookStore(context: Context, private val clock: () -> Long = System::cur
 
     @Synchronized fun delete(vin: String, id: String) = saveEntries(vin, _entries.value[vin].orEmpty().filterNot { it.id == id })
 
+    /** Sets one charge's own rate; null makes it follow the default rate again. */
+    @Synchronized fun setRate(vin: String, id: String, wonPerKwh: Int?) {
+        require(wonPerKwh == null || wonPerKwh in RATE_RANGE) { "충전 단가는 1~2,000원/kWh 사이로 입력해 주세요." }
+        saveEntries(vin, _entries.value[vin].orEmpty().map { if (it.id == id) it.copy(wonPerKwh = wonPerKwh) else it })
+    }
+
     /** Applies one vehicle charge reading; returns what was decided so the caller can log it. */
     @Synchronized fun observe(vin: String, charge: ChargeSnapshot, odometerKm: Double?): ChargeDetection {
         val latestKm = _entries.value[vin]?.maxOfOrNull { it.odometerKm }
@@ -61,8 +67,10 @@ class LogbookStore(context: Context, private val clock: () -> Long = System::cur
         val data = JSONObject()
         next.forEach { (key, list) ->
             data.put(key, JSONArray().apply {
-                list.forEach { put(JSONObject().put("id", it.id).put("time", it.timeMs).put("odometer", it.odometerKm)
-                    .put("kwh", it.energyKwh).put("source", it.source.name)) }
+                list.forEach { entry ->
+                    put(JSONObject().put("id", entry.id).put("time", entry.timeMs).put("odometer", entry.odometerKm)
+                        .put("kwh", entry.energyKwh).put("source", entry.source.name).apply { entry.wonPerKwh?.let { put("rate", it) } })
+                }
             })
         }
         check(prefs.edit().putString("entries", data.toString()).commit()) { "충전 기록 저장에 실패했습니다." }
@@ -84,6 +92,7 @@ class LogbookStore(context: Context, private val clock: () -> Long = System::cur
 
     companion object {
         const val LIMIT = 500
+        private val RATE_RANGE = 1..2000
         private const val MAX_ODOMETER_KM = 2_000_000.0
         private const val MIN_ENERGY_KWH = 0.1
         private const val MAX_ENERGY_KWH = 200.0

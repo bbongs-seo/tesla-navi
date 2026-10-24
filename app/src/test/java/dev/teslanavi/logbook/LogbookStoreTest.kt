@@ -52,6 +52,17 @@ class LogbookStoreTest {
         assertEquals(listOf(second.id), LogbookStore(context).entries.value[vinA]!!.map { it.id })
     }
 
+    @Test fun ownRateIsSavedPerChargeAndCanFollowTheDefaultAgain() {
+        val store = LogbookStore(context)
+        val first = store.add(vinA, 10_000.0, 40.0)
+        val second = store.add(vinA, 10_300.0, 35.0)
+        store.setRate(vinA, second.id, 347)
+        assertEquals(listOf(null, 347), LogbookStore(context).entries.value[vinA]!!.map { it.wonPerKwh })
+        assertThrows(IllegalArgumentException::class.java) { store.setRate(vinA, first.id, 0) }
+        store.setRate(vinA, second.id, null)
+        assertEquals(listOf(null, null), LogbookStore(context).entries.value[vinA]!!.map { it.wonPerKwh })
+    }
+
     @Test fun logbookStartsOffAtSlowChargingRateAndClampsStoredRate() {
         val features = dev.teslanavi.data.FeatureSettings(context)
         assertFalse(features.logbook.value)

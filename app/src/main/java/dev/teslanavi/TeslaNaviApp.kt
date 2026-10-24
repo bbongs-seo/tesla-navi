@@ -8,6 +8,7 @@ import dev.teslanavi.drive.DriveController
 import dev.teslanavi.drive.AutoConnectSettings
 import dev.teslanavi.logbook.LogbookSettings
 import dev.teslanavi.logbook.LogbookStore
+import dev.teslanavi.logbook.TripStore
 import dev.teslanavi.navigation.*
 import kotlinx.coroutines.MainScope
 
@@ -23,6 +24,7 @@ class TeslaNaviApp : Application() {
     val logbook by lazy { LogbookStore(this) }
     val voiceModel by lazy { SupertonicModel(noBackupFilesDir, MainScope()) }
     val supertonic by lazy { SupertonicVoice(voiceModel::installedDir) }
+    val trips by lazy { TripStore(this) }
     val cameras by lazy {
         CameraController(KakaoNavigationEngine(this, kakao), guidanceSpeaker(), guidance.options, android.os.SystemClock::elapsedRealtime)
             .also { it.configured(kakao.hasKey.value) }

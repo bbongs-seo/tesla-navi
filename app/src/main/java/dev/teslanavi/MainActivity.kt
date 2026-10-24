@@ -24,8 +24,6 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.automirrored.filled.List
-import androidx.compose.material.icons.automirrored.outlined.List
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.MoreVert
@@ -47,6 +45,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.semantics.Role
@@ -129,6 +128,7 @@ class MainActivity : ComponentActivity() {
                 val logbook by app.features.logbook.collectAsStateWithLifecycle()
                 val wonPerKwh by app.logbookSettings.wonPerKwh.collectAsStateWithLifecycle()
                 val chargeEntries by app.logbook.entries.collectAsStateWithLifecycle()
+                val trips by app.trips.trips.collectAsStateWithLifecycle()
                 var showGuidance by remember { mutableStateOf(false) }
                 var logbookVin by rememberSaveable { mutableStateOf<String?>(null) }
                 val guidanceActive = cameras.phase in setOf(CameraPhase.INITIALIZING, CameraPhase.WAITING_GPS, CameraPhase.GUIDING)
@@ -147,11 +147,13 @@ class MainActivity : ComponentActivity() {
                         guidancePage = { onBack -> GuidanceSettingsPage(app, guidanceActive, onBack) }) { onOpenSettings ->
                         // The logbook picks its own vehicle; it defaults to the connection selection but never changes it.
                         val profile = profiles.firstOrNull { it.vin == logbookVin } ?: profiles.firstOrNull { it.vin == selected } ?: profiles.firstOrNull()
-                        LogbookScreen(state, onOpenSettings, profiles, profile, chargeEntries[profile?.vin].orEmpty(), wonPerKwh,
-                            state.takeIf { it.vin != null && it.vin == profile?.vin }?.snapshot?.odometerKm,
+                        StatsScreen(state, onOpenSettings, profiles, profile, chargeEntries[profile?.vin].orEmpty(), trips[profile?.vin].orEmpty(),
+                            wonPerKwh, state.takeIf { it.vin != null && it.vin == profile?.vin }?.snapshot?.odometerKm,
                             onVehicle = { logbookVin = it }, onRate = { app.logbookSettings.rate(it) },
+                            onSetRate = { id, rate -> profile?.let { app.logbook.setRate(it.vin, id, rate) } },
                             onAdd = { odometer, energy -> app.logbook.add(checkNotNull(profile).vin, odometer, energy) },
-                            onDelete = { id -> profile?.let { app.logbook.delete(it.vin, id) } })
+                            onDelete = { id -> profile?.let { app.logbook.delete(it.vin, id) } },
+                            onDeleteTrip = { id -> profile?.let { app.trips.delete(it.vin, id) } })
                     }
                 }
                 if (showGuidance) GuidanceSettingsDialog(app, guidanceActive) { showGuidance = false }
@@ -248,7 +250,7 @@ class MainActivity : ComponentActivity() {
 
 private enum class AppTab(val label: String, val icon: ImageVector, val selectedIcon: ImageVector) {
     MAIN("메인", Icons.Outlined.Home, Icons.Filled.Home),
-    LOGBOOK("차계부", Icons.AutoMirrored.Outlined.List, Icons.AutoMirrored.Filled.List),
+    LOGBOOK("통계", BarChartOutlined, BarChartFilled),
     SETTINGS("설정", Icons.Outlined.Settings, Icons.Filled.Settings),
 }
 
@@ -324,7 +326,7 @@ private fun FeatureSwitches(settingsTab: Boolean, onSettingsTab: (Boolean) -> Un
     Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
         FeatureSwitch("하단 설정 탭", "켜면 화면 아래에 설정 탭이 생기고 차량 등록·연결, 자동 연결, 안내 설정, 연결 기록을 설정 탭으로 옮깁니다. 끄면 메인 화면에 다시 표시합니다.",
             settingsTab, onSettingsTab)
-        FeatureSwitch("차계부 탭", "켜면 화면 아래에 차계부 탭이 생깁니다. 충전량과 주행거리로 전비와 km당 충전비를 계산하고, 차량이 연결된 동안 충전을 자동으로 기록합니다.",
+        FeatureSwitch("통계 탭", "켜면 화면 아래에 통계 탭이 생깁니다. 충전 기록으로 전비와 km당 충전비를, 주행 기록으로 거리와 시간을 보여 주며, 차량이 연결된 동안 자동으로 기록합니다.",
             logbook, onLogbook)
     }
 }
@@ -638,70 +640,120 @@ private fun CameraCard(state: CameraState, hasKey: Boolean, onMute: (Boolean) ->
 
 private fun formatCameraDistance(meters: Int): String = if (meters >= 1000) String.format(Locale.KOREA, "%.1f km 앞", meters / 1000.0) else "$meters m 앞"
 
+private enum class StatsSegment(val label: String) { CHARGE("충전"), DRIVE("주행") }
+
 @Composable
-private fun LogbookScreen(state: DriveState, onOpenSettings: (() -> Unit)?, profiles: List<VehicleProfile>, profile: VehicleProfile?,
-    entries: List<ChargeEntry>, wonPerKwh: Int, odometerKm: Double?, onVehicle: (String) -> Unit, onRate: (Int) -> Unit,
-    onAdd: (Double, Double) -> Unit, onDelete: (String) -> Unit) {
-    var showAdd by remember { mutableStateOf(false) }
-    var showRate by remember { mutableStateOf(false) }
-    var showInfo by remember { mutableStateOf(false) }
-    var pendingDelete by remember { mutableStateOf<ChargeEntry?>(null) }
-    val summary = remember(entries, wonPerKwh) { ChargeLogbook.summarize(entries, wonPerKwh) }
-    val months = remember(summary) { ChargeLogbook.byMonth(summary.intervals.asReversed(), ZoneId.systemDefault()) }
+private fun StatsScreen(state: DriveState, onOpenSettings: (() -> Unit)?, profiles: List<VehicleProfile>, profile: VehicleProfile?,
+    entries: List<ChargeEntry>, trips: List<DriveTrip>, wonPerKwh: Int, odometerKm: Double?, onVehicle: (String) -> Unit,
+    onRate: (Int) -> Unit, onSetRate: (String, Int?) -> Unit, onAdd: (Double, Double) -> Unit, onDelete: (String) -> Unit,
+    onDeleteTrip: (String) -> Unit) {
+    var segment by rememberSaveable { mutableStateOf(StatsSegment.CHARGE) }
     ScreenColumn {
-        MainHeader(state, onOpenSettings, title = "차계부")
+        MainHeader(state, onOpenSettings, title = "통계")
         if (profile == null) AppCard {
             Text("차량을 먼저 등록해 주세요", fontSize = 19.sp, fontWeight = FontWeight.SemiBold)
-            Text("충전 기록은 차량별로 저장합니다. 차량을 등록하면 여기서 바로 기록할 수 있습니다.", color = Muted)
+            Text("충전·주행 기록은 차량별로 저장합니다. 차량을 등록하면 여기서 바로 볼 수 있습니다.", color = Muted)
         } else {
             if (profiles.size > 1) Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 profiles.forEach { item ->
                     val chosen = item.vin == profile.vin
                     FilterChip(selected = chosen, onClick = { onVehicle(item.vin) }, label = { Text(item.label, fontWeight = FontWeight.SemiBold) },
                         leadingIcon = if (chosen) { { Icon(Icons.Filled.Check, contentDescription = null, modifier = Modifier.size(18.dp)) } } else null,
-                        colors = FilterChipDefaults.filterChipColors(labelColor = Muted, selectedContainerColor = Color(0xFF203732),
-                            selectedLabelColor = Mint, selectedLeadingIconColor = Mint),
-                        border = FilterChipDefaults.filterChipBorder(enabled = true, selected = chosen,
-                            borderColor = Color(0xFF2F3A47), selectedBorderColor = Mint))
+                        colors = statsChipColors(), border = statsChipBorder(chosen))
                 }
             }
-            AppCard {
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                    Text(if (profiles.size > 1) "최근 충전" else profile.label, Modifier.weight(1f), color = Muted, fontSize = 13.sp)
-                    TextButton(onClick = { showAdd = true }) { Text("+ 충전 기록") }
-                }
-                val latest = summary.latest
-                if (latest?.kmPerKwh != null && latest.wonPerKm != null) {
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        MetricBox(formatDecimal(latest.kmPerKwh), "km/kWh", Modifier.weight(1f))
-                        MetricBox(formatDecimal(latest.wonPerKm), "원/km", Modifier.weight(1f))
-                    }
-                    Text("주행 ${formatKm(latest.distanceKm ?: 0.0)} · 충전 ${formatDecimal(latest.entry.energyKwh)} kWh", fontSize = 15.sp)
-                } else Text(if (entries.isEmpty()) "첫 충전을 기록해 주세요" else "다음 충전을 기록하면 전비를 계산합니다", fontSize = 17.sp, color = Muted)
-                if (summary.measuredCount >= 2 && summary.kmPerKwh != null && summary.wonPerKm != null) Text(
-                    "전체 평균 ${formatDecimal(summary.kmPerKwh)} km/kWh · ${formatWonPerKm(summary.wonPerKm)} · 누적 ${formatKm(summary.distanceKm)}", fontSize = 13.sp)
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                    Text("충전 단가 ${String.format(Locale.KOREA, "%,d", wonPerKwh)}원/kWh 기준", Modifier.weight(1f), color = Muted, fontSize = 12.sp)
-                    TextButton(onClick = { showRate = true }) { Text("단가 변경") }
+            MonthStrip(entries, trips, wonPerKwh)
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                StatsSegment.entries.forEach { item ->
+                    val chosen = item == segment
+                    FilterChip(selected = chosen, onClick = { segment = item }, modifier = Modifier.weight(1f).heightIn(min = 44.dp),
+                        label = { Text(item.label, Modifier.fillMaxWidth(), fontWeight = FontWeight.SemiBold, fontSize = 15.sp) },
+                        leadingIcon = { Icon(if (item == StatsSegment.CHARGE) EvStationOutlined else RouteOutlined, contentDescription = null, modifier = Modifier.size(20.dp)) },
+                        colors = statsChipColors(), border = statsChipBorder(chosen))
                 }
             }
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("충전 기록", fontWeight = FontWeight.SemiBold)
-                    IconButton(onClick = { showInfo = true }, modifier = Modifier.size(40.dp)) {
-                        Icon(Icons.Outlined.Info, contentDescription = "충전 기록 안내", tint = Muted, modifier = Modifier.size(20.dp))
-                    }
-                }
-                if (months.isEmpty()) AppCard { Text("충전 기록이 없습니다.", color = Muted) }
-                months.forEach { group ->
-                    MonthHeader(group, wonPerKwh)
-                    group.intervals.forEach { interval -> ChargeTile(interval) { pendingDelete = interval.entry } }
-                }
-            }
+            if (segment == StatsSegment.CHARGE) ChargeStats(entries, wonPerKwh, odometerKm, onRate, onSetRate, onAdd, onDelete)
+            else DriveStats(trips, onDeleteTrip)
         }
         VersionFooter()
     }
+}
+
+@Composable
+private fun statsChipColors() = FilterChipDefaults.filterChipColors(labelColor = Muted, iconColor = Muted, selectedContainerColor = Color(0xFF203732),
+    selectedLabelColor = Mint, selectedLeadingIconColor = Mint)
+
+@Composable
+private fun statsChipBorder(chosen: Boolean) = FilterChipDefaults.filterChipBorder(enabled = true, selected = chosen,
+    borderColor = Color(0xFF2F3A47), selectedBorderColor = Mint)
+
+/** This month's driving and charging together: the one view the two segments cannot give on their own. */
+@Composable
+private fun MonthStrip(entries: List<ChargeEntry>, trips: List<DriveTrip>, wonPerKwh: Int) {
+    val month = java.time.YearMonth.now()
+    fun inMonth(timeMs: Long) = java.time.YearMonth.from(Instant.ofEpochMilli(timeMs).atZone(ZoneId.systemDefault())) == month
+    val km = trips.filter { inMonth(it.startMs) }.sumOf { it.distanceKm }
+    val charges = entries.filter { inMonth(it.timeMs) }
+    val kwh = charges.sumOf { it.energyKwh }
+    Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp), color = Color(0xFF242D38)) {
+        val parts = listOfNotNull(String.format(Locale.KOREA, "주행 %,.0f km", km).takeIf { km > 0 },
+            String.format(Locale.KOREA, "충전 %.1f kWh · 약 %,d원", kwh, ChargeLogbook.cost(charges, wonPerKwh).roundToLong()).takeIf { kwh > 0 })
+        Text(if (parts.isEmpty()) "이번 달 기록이 아직 없습니다" else (listOf("이번 달") + parts).joinToString(" · "),
+            Modifier.padding(horizontal = 14.dp, vertical = 10.dp), color = Muted, fontSize = 13.sp)
+    }
+}
+
+@Composable
+private fun ChargeStats(entries: List<ChargeEntry>, wonPerKwh: Int, odometerKm: Double?, onRate: (Int) -> Unit,
+    onSetRate: (String, Int?) -> Unit, onAdd: (Double, Double) -> Unit, onDelete: (String) -> Unit) {
+    var showAdd by remember { mutableStateOf(false) }
+    var editingRate by remember { mutableStateOf<ChargeEntry?>(null) }
+    var showRate by remember { mutableStateOf(false) }
+    var showInfo by remember { mutableStateOf(false) }
+    var pendingDelete by remember { mutableStateOf<ChargeEntry?>(null) }
+    val summary = remember(entries, wonPerKwh) { ChargeLogbook.summarize(entries, wonPerKwh) }
+    val months = remember(summary) { groupByMonth(summary.intervals.asReversed(), ZoneId.systemDefault()) { it.entry.timeMs } }
+    AppCard {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+            Text("최근 충전", Modifier.weight(1f), color = Muted, fontSize = 13.sp)
+            TextButton(onClick = { showAdd = true }) { Text("+ 충전 기록") }
+        }
+        val latest = summary.latest
+        if (latest?.kmPerKwh != null && latest.wonPerKm != null) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                MetricBox(formatDecimal(latest.kmPerKwh), "km/kWh", Modifier.weight(1f))
+                MetricBox(formatDecimal(latest.wonPerKm), "원/km", Modifier.weight(1f))
+            }
+            Text("주행 ${formatKm(latest.distanceKm ?: 0.0)} · 충전 ${formatDecimal(latest.entry.energyKwh)} kWh", fontSize = 15.sp)
+        } else Text(if (entries.isEmpty()) "첫 충전을 기록해 주세요" else "다음 충전을 기록하면 전비를 계산합니다", fontSize = 17.sp, color = Muted)
+        if (summary.measuredCount >= 2 && summary.kmPerKwh != null && summary.wonPerKm != null) Text(
+            "전체 평균 ${formatDecimal(summary.kmPerKwh)} km/kWh · ${formatWonPerKm(summary.wonPerKm)} · 누적 ${formatKm(summary.distanceKm)}", fontSize = 13.sp)
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+            Text("기본 충전 단가 ${String.format(Locale.KOREA, "%,d", wonPerKwh)}원/kWh", Modifier.weight(1f), color = Muted, fontSize = 12.sp)
+            TextButton(onClick = { showRate = true }) { Text("단가 변경") }
+        }
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("충전 기록", fontWeight = FontWeight.SemiBold)
+            IconButton(onClick = { showInfo = true }, modifier = Modifier.size(40.dp)) {
+                Icon(Icons.Outlined.Info, contentDescription = "충전 기록 안내", tint = Muted, modifier = Modifier.size(20.dp))
+            }
+        }
+        if (months.isEmpty()) AppCard { Text("충전 기록이 없습니다.", color = Muted) }
+        months.forEach { group ->
+            val charges = group.items.map { it.entry }
+            MonthHeader(group.month, String.format(Locale.KOREA, "%d회 · %.1f kWh · 약 %,d원", charges.size, charges.sumOf { it.energyKwh },
+                ChargeLogbook.cost(charges, wonPerKwh).roundToLong()))
+            group.items.forEach { interval ->
+                ChargeTile(interval, onEditRate = { editingRate = interval.entry }) { pendingDelete = interval.entry }
+            }
+        }
+    }
     if (showRate) RateDialog(wonPerKwh, onDismiss = { showRate = false }, onSave = { onRate(it); showRate = false })
+    editingRate?.let { entry ->
+        EntryRateDialog(entry, wonPerKwh, onDismiss = { editingRate = null }, onSave = { onSetRate(entry.id, it); editingRate = null })
+    }
     if (showAdd) ChargeDialog(odometerKm, onDismiss = { showAdd = false }, onSave = { odometer, energy -> onAdd(odometer, energy); showAdd = false })
     if (showInfo) AlertDialog(onDismissRequest = { showInfo = false },
         title = { Text("충전 기록 안내") },
@@ -718,6 +770,99 @@ private fun LogbookScreen(state: DriveState, onOpenSettings: (() -> Unit)?, prof
 }
 
 @Composable
+private fun DriveStats(trips: List<DriveTrip>, onDelete: (String) -> Unit) {
+    var showInfo by remember { mutableStateOf(false) }
+    var pendingDelete by remember { mutableStateOf<DriveTrip?>(null) }
+    val newestFirst = remember(trips) { trips.sortedByDescending { it.startMs } }
+    val months = remember(newestFirst) { groupByMonth(newestFirst, ZoneId.systemDefault()) { it.startMs } }
+    AppCard {
+        Text("최근 주행", color = Muted, fontSize = 13.sp)
+        val latest = newestFirst.firstOrNull()
+        if (latest != null) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                MetricBox(formatDecimal(latest.distanceKm), "km", Modifier.weight(1f))
+                MetricBox((latest.durationMs / 60_000).toString(), "분", Modifier.weight(1f))
+            }
+            // Labeled cells instead of one "·" sentence, which broke mid-word on narrow screens.
+            Row(Modifier.fillMaxWidth()) {
+                TileMetric("평균 속도", latest.averageKph?.let { "${it.roundToInt()} km/h" } ?: "—", Modifier.weight(1f))
+                TileMetric("최고 속도", "${latest.maxSpeedKph.roundToInt()} km/h", Modifier.weight(1f))
+                TileMetric("배터리", latest.batteryUsed?.let { formatBatteryUsed(it) } ?: "—", Modifier.weight(1f))
+            }
+        } else Text("차량이 연결된 동안 주행하면 자동으로 기록합니다", fontSize = 17.sp, color = Muted)
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("주행 기록", fontWeight = FontWeight.SemiBold)
+            IconButton(onClick = { showInfo = true }, modifier = Modifier.size(40.dp)) {
+                Icon(Icons.Outlined.Info, contentDescription = "주행 기록 안내", tint = Muted, modifier = Modifier.size(20.dp))
+            }
+        }
+        if (months.isEmpty()) AppCard { Text("주행 기록이 없습니다.", color = Muted) }
+        months.forEach { group ->
+            val km = group.items.sumOf { it.distanceKm }
+            val minutes = group.items.sumOf { it.durationMs } / 60_000
+            MonthHeader(group.month, String.format(Locale.KOREA, "%d회 · %,.0f km · %s", group.items.size, km, formatMinutes(minutes)))
+            group.items.forEachIndexed { index, trip ->
+                DriveTile(trip) { pendingDelete = trip }
+                // Distance the odometer moved between two logged trips was driven without the app.
+                val older = group.items.getOrNull(index + 1)
+                val gap = if (older?.endKm != null && trip.startKm != null) trip.startKm - older.endKm else null
+                if (gap != null && gap >= 1.0) Text(String.format(Locale.KOREA, "기록되지 않은 주행 약 %,.0f km", gap),
+                    Modifier.fillMaxWidth().padding(horizontal = 4.dp), color = Muted, fontSize = 12.sp, textAlign = TextAlign.Center)
+            }
+        }
+    }
+    if (showInfo) AlertDialog(onDismissRequest = { showInfo = false },
+        title = { Text("주행 기록 안내") },
+        text = { Text("차량이 연결된 동안 P단을 벗어나 3 km/h 이상으로 움직이면 주행을 시작하고, P단에 두면 끝냅니다. 카메라 안내와 같은 기준입니다.\n\n" +
+            "0.3 km 미만 이동은 남기지 않습니다. 휴대폰 없이 탄 구간은 다음 기록과의 주행거리 차이로 표시합니다.") },
+        confirmButton = { TextButton(onClick = { showInfo = false }) { Text("닫기") } })
+    pendingDelete?.let { trip ->
+        AlertDialog(onDismissRequest = { pendingDelete = null },
+            title = { Text("주행 기록 삭제") },
+            text = { Text("${formatChargeTime(trip.startMs)} · ${formatDecimal(trip.distanceKm)} km 주행 기록을 삭제할까요?") },
+            confirmButton = { TextButton(onClick = { onDelete(trip.id); pendingDelete = null }) { Text("삭제") } },
+            dismissButton = { TextButton(onClick = { pendingDelete = null }) { Text("취소") } })
+    }
+}
+
+/** Leading distance badge, time range as the headline, then labeled values, matching the charge tile. */
+@Composable
+private fun DriveTile(trip: DriveTrip, onDelete: () -> Unit) {
+    var menu by remember { mutableStateOf(false) }
+    Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp), color = Panel) {
+        Column(Modifier.padding(start = 14.dp, top = 12.dp, bottom = 14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Surface(Modifier.size(56.dp), shape = RoundedCornerShape(14.dp), color = Color(0xFF203732)) {
+                    Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
+                        val (distance, unit) = tripDistance(trip.distanceKm)
+                        Text(distance, fontSize = 18.sp, lineHeight = 20.sp, fontWeight = FontWeight.Bold, color = Mint, maxLines = 1)
+                        Text(unit, fontSize = 10.sp, lineHeight = 12.sp, color = Mint)
+                    }
+                }
+                Column(Modifier.weight(1f).padding(start = 12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(formatTripDay(trip.startMs), color = Muted, fontSize = 13.sp)
+                    Text("${formatClock(trip.startMs)} → ${formatClock(trip.endMs)}", fontSize = 17.sp, fontWeight = FontWeight.Bold, color = Mint)
+                }
+                Box {
+                    IconButton(onClick = { menu = true }) { Icon(Icons.Filled.MoreVert, contentDescription = "주행 기록 메뉴", tint = Muted) }
+                    DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                        DropdownMenuItem(text = { Text("기록 삭제") }, onClick = { menu = false; onDelete() })
+                    }
+                }
+            }
+            HorizontalDivider(Modifier.padding(end = 14.dp), color = Color(0xFF29323D))
+            Row(Modifier.fillMaxWidth().padding(end = 14.dp)) {
+                TileMetric("운전 시간", formatMinutes(trip.durationMs / 60_000), Modifier.weight(1f))
+                TileMetric("평균 속도", trip.averageKph?.let { "${it.roundToInt()} km/h" } ?: "—", Modifier.weight(1f))
+                TileMetric("배터리", trip.batteryUsed?.let { formatBatteryUsed(it) } ?: "—", Modifier.weight(1f))
+            }
+        }
+    }
+}
+
+@Composable
 private fun MetricBox(value: String, unit: String, modifier: Modifier) {
     Surface(modifier, color = Color(0xFF203732), shape = RoundedCornerShape(20.dp)) {
         Column(Modifier.fillMaxWidth().padding(vertical = 18.dp), horizontalAlignment = Alignment.CenterHorizontally) {
@@ -728,18 +873,17 @@ private fun MetricBox(value: String, unit: String, modifier: Modifier) {
 }
 
 @Composable
-private fun MonthHeader(group: MonthGroup, wonPerKwh: Int) {
+private fun MonthHeader(month: java.time.YearMonth, summary: String) {
     Row(Modifier.fillMaxWidth().padding(start = 4.dp, end = 4.dp, top = 6.dp), horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically) {
-        Text(String.format(Locale.KOREA, "%d년 %d월", group.month.year, group.month.monthValue), color = Mint, fontSize = 13.sp, fontWeight = FontWeight.Bold)
-        Text(String.format(Locale.KOREA, "%d회 · %.1f kWh · 약 %,d원", group.intervals.size, group.energyKwh, (group.energyKwh * wonPerKwh).roundToLong()),
-            color = Muted, fontSize = 12.sp)
+        Text(String.format(Locale.KOREA, "%d년 %d월", month.year, month.monthValue), color = Mint, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+        Text(summary, color = Muted, fontSize = 12.sp)
     }
 }
 
 /** Leading efficiency badge, cost as the headline, then labeled values: scanned in that order. */
 @Composable
-private fun ChargeTile(interval: ChargeInterval, onDelete: () -> Unit) {
+private fun ChargeTile(interval: ChargeInterval, onEditRate: () -> Unit, onDelete: () -> Unit) {
     val entry = interval.entry
     var menu by remember { mutableStateOf(false) }
     Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp), color = Panel) {
@@ -748,18 +892,13 @@ private fun ChargeTile(interval: ChargeInterval, onDelete: () -> Unit) {
                 EfficiencyBadge(interval)
                 Column(Modifier.weight(1f).padding(start = 12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text(formatChargeDay(entry.timeMs), color = Muted, fontSize = 13.sp)
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text(interval.wonPerKm?.let { formatWonPerKm(it) } ?: if (interval.distanceKm == null) "기준 기록" else "주행 없음",
-                            fontSize = 17.sp, fontWeight = FontWeight.Bold, color = if (interval.wonPerKm != null) Mint else Muted)
-                        Surface(shape = RoundedCornerShape(50), color = Color(0xFF242D38)) {
-                            Text(if (entry.source == EntrySource.AUTO) "자동" else "직접", Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
-                                color = Muted, fontSize = 11.sp)
-                        }
-                    }
+                    Text(interval.wonPerKm?.let { formatWonPerKm(it) } ?: if (interval.distanceKm == null) "기준 기록" else "주행 없음",
+                        fontSize = 17.sp, fontWeight = FontWeight.Bold, color = if (interval.wonPerKm != null) Mint else Muted)
                 }
                 Box {
                     IconButton(onClick = { menu = true }) { Icon(Icons.Filled.MoreVert, contentDescription = "충전 기록 메뉴", tint = Muted) }
                     DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                        DropdownMenuItem(text = { Text("충전단가 수정") }, onClick = { menu = false; onEditRate() })
                         DropdownMenuItem(text = { Text("기록 삭제") }, onClick = { menu = false; onDelete() })
                     }
                 }
@@ -780,8 +919,8 @@ private fun EfficiencyBadge(interval: ChargeInterval) {
     Surface(Modifier.size(56.dp), shape = RoundedCornerShape(14.dp), color = if (value != null) Color(0xFF203732) else Color(0xFF242D38)) {
         Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
             if (value != null) {
-                Text(formatDecimal(value), fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Mint)
-                Text("km/kWh", fontSize = 9.sp, color = Mint)
+                Text(formatDecimal(value), fontSize = 20.sp, lineHeight = 22.sp, fontWeight = FontWeight.Bold, color = Mint)
+                Text("km/kWh", fontSize = 9.sp, lineHeight = 11.sp, color = Mint)
             } else Text(if (interval.distanceKm == null) "기준" else "—", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = Muted)
         }
     }
@@ -789,9 +928,12 @@ private fun EfficiencyBadge(interval: ChargeInterval) {
 
 @Composable
 private fun TileMetric(label: String, value: String, modifier: Modifier) {
-    Column(modifier, verticalArrangement = Arrangement.spacedBy(2.dp)) {
-        Text(label, color = Muted, fontSize = 11.sp)
-        Text(value, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+    // Label and value centre on each other; the pair stays at the cell start so it lines up with the badge above.
+    Box(modifier) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(label, color = Muted, fontSize = 11.sp)
+            Text(value, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+        }
     }
 }
 
@@ -829,14 +971,37 @@ private fun RateDialog(wonPerKwh: Int, onDismiss: () -> Unit, onSave: (Int) -> U
     var rate by remember { mutableStateOf(wonPerKwh.toString()) }
     val value = rate.toIntOrNull()?.takeIf { it in 1..2000 }
     AlertDialog(onDismissRequest = onDismiss,
-        title = { Text("충전 단가") },
+        title = { Text("기본 충전 단가") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedTextField(value = rate, onValueChange = { rate = it.filter(Char::isDigit).take(4) },
-                    label = { Text("충전 단가 (원/kWh)") }, singleLine = true, isError = rate.isNotEmpty() && value == null,
+                    label = { Text("기본 충전 단가 (원/kWh)") }, singleLine = true, isError = rate.isNotEmpty() && value == null,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                    supportingText = { Text("기본 ${DEFAULT_WON_PER_KWH}원 · 환경부 공공 완속(2026년 8월 개편) 기준") })
+                    supportingText = { Text("기본 ${DEFAULT_WON_PER_KWH}원 · 환경부 공공 완속(2026년 8월 개편) 기준. 단가를 따로 정한 충전에는 적용되지 않습니다.") })
                 TextButton(onClick = { rate = DEFAULT_WON_PER_KWH.toString() }) { Text("기본값으로") }
+            }
+        },
+        confirmButton = { TextButton(onClick = { value?.let(onSave) }, enabled = value != null) { Text("저장") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("취소") } })
+}
+
+/** One charge's own rate; saving the default value still pins it, the reset button makes it follow the default again. */
+@Composable
+private fun EntryRateDialog(entry: ChargeEntry, defaultWonPerKwh: Int, onDismiss: () -> Unit, onSave: (Int?) -> Unit) {
+    var rate by remember { mutableStateOf(entry.rate(defaultWonPerKwh).toString()) }
+    val value = rate.toIntOrNull()?.takeIf { it in 1..2000 }
+    AlertDialog(onDismissRequest = onDismiss,
+        title = { Text("충전단가 수정") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("${formatChargeTime(entry.timeMs)} · ${formatDecimal(entry.energyKwh)} kWh 충전", color = Muted, fontSize = 13.sp)
+                OutlinedTextField(value = rate, onValueChange = { rate = it.filter(Char::isDigit).take(4) },
+                    label = { Text("이 충전의 단가 (원/kWh)") }, singleLine = true, isError = rate.isNotEmpty() && value == null,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    supportingText = { Text("이 충전의 km당 충전비와 충전비 합계에 반영됩니다") })
+                if (entry.wonPerKwh != null) TextButton(onClick = { onSave(null) }) {
+                    Text("기본 단가(${String.format(Locale.KOREA, "%,d", defaultWonPerKwh)}원)로 되돌리기")
+                }
             }
         },
         confirmButton = { TextButton(onClick = { value?.let(onSave) }, enabled = value != null) { Text("저장") } },
@@ -846,6 +1011,19 @@ private fun RateDialog(wonPerKwh: Int, onDismiss: () -> Unit, onSave: (Int) -> U
 private fun formatDecimal(value: Double) = String.format(Locale.KOREA, "%.1f", value)
 private fun formatWonPerKm(value: Double) = String.format(Locale.KOREA, "%.1f원/km", value)
 private fun formatKm(value: Double) = String.format(Locale.KOREA, "%,.0f km", value)
+private fun formatTripDay(timeMs: Long): String =
+    DateTimeFormatter.ofPattern("M월 d일 (E)", Locale.KOREA).format(Instant.ofEpochMilli(timeMs).atZone(ZoneId.systemDefault()))
+private fun formatClock(timeMs: Long): String =
+    DateTimeFormatter.ofPattern("HH:mm", Locale.KOREA).format(Instant.ofEpochMilli(timeMs).atZone(ZoneId.systemDefault()))
+/** Trip list badge only: whole kilometres, cut rather than rounded (20.6 → 20 km), or 100 m steps under 1 km. */
+private fun tripDistance(km: Double): Pair<String, String> =
+    if (km < 1.0) ((km * 10).toInt() * 100).toString() to "m" else String.format(Locale.KOREA, "%,d", km.toLong()) to "km"
+private fun formatMinutes(minutes: Long): String = when {
+    minutes < 60 -> "${minutes}분"
+    minutes % 60 == 0L -> "${minutes / 60}시간"
+    else -> "${minutes / 60}시간 ${minutes % 60}분"
+}
+private fun formatBatteryUsed(points: Int): String = if (points > 0) "-${points}%" else if (points < 0) "+${-points}%" else "0%"
 private fun formatChargeDay(timeMs: Long): String =
     DateTimeFormatter.ofPattern("M월 d일 (E) HH:mm", Locale.KOREA).format(Instant.ofEpochMilli(timeMs).atZone(ZoneId.systemDefault()))
 private fun formatChargeTime(timeMs: Long): String =

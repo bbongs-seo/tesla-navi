@@ -32,6 +32,16 @@ class ChargeLogbookTest {
         assertEquals(300 * 65.0 / 500.0, summary.wonPerKm!!, 1e-9)
     }
 
+    @Test fun ownRateRepricesOnlyThatChargeAndTheAverage() {
+        val entries = listOf(entry(1_000.0, 50.0), entry(1_300.0, 40.0).copy(wonPerKwh = 347), entry(1_500.0, 25.0))
+        val summary = ChargeLogbook.summarize(entries, 300)
+        assertEquals(347 / 7.5, summary.intervals[1].wonPerKm!!, 1e-9)
+        assertEquals(7.5, summary.intervals[1].kmPerKwh!!, 1e-9)
+        assertEquals(300 / 8.0, summary.intervals[2].wonPerKm!!, 1e-9)
+        assertEquals((40 * 347 + 25 * 300) / 500.0, summary.wonPerKm!!, 1e-9)
+        assertEquals(50 * 300 + 40 * 347 + 25 * 300.0, ChargeLogbook.cost(entries, 300), 1e-9)
+    }
+
     @Test fun singleEntryOrNoDrivingProducesNoEfficiency() {
         val single = ChargeLogbook.summarize(listOf(entry(1_000.0, 50.0)), 295)
         assertNull(single.latest); assertNull(single.kmPerKwh); assertEquals(0.0, single.distanceKm, 0.0)
@@ -49,10 +59,10 @@ class ChargeLogbookTest {
             ChargeEntry("b", august, 10_300.0, 20.0, EntrySource.MANUAL),
             ChargeEntry("c", october + 1_000, 10_100.0, 10.0, EntrySource.MANUAL))
         val intervals = ChargeLogbook.summarize(entries, 295).intervals.asReversed()
-        val groups = ChargeLogbook.byMonth(intervals, ZoneOffset.UTC)
+        val groups = groupByMonth(intervals, ZoneOffset.UTC) { it.entry.timeMs }
         assertEquals(listOf(YearMonth.of(2026, 10), YearMonth.of(2026, 8)), groups.map { it.month })
-        assertEquals(listOf("a", "c"), groups.first().intervals.map { it.entry.id })
-        assertEquals(40.0, groups.first().energyKwh, 1e-9)
+        assertEquals(listOf("a", "c"), groups.first().items.map { it.entry.id })
+        assertEquals(40.0, groups.first().items.sumOf { it.entry.energyKwh }, 1e-9)
     }
 
     @Test fun firstReadingOnlyBecomesBaselineBecauseItsSessionMayBeOld() {

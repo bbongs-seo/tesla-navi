@@ -76,6 +76,11 @@ class DriveController(private val context: Context, private val keyStore: Vehicl
     }
 
     suspend fun run(profile: VehicleProfile, enroll: Boolean) {
+        // A dropped BLE link reconnects inside the session; only the end of the session closes an open trip.
+        try { connect(profile, enroll) } finally { finishTrip(profile.vin) }
+    }
+
+    private suspend fun connect(profile: VehicleProfile, enroll: Boolean) {
         status(if (enroll) "앱 키 등록 시작 · 저장된 키 준비 중" else "차량 인증 연결 시작 · 저장된 키 준비 중")
         val keys = withContext(Dispatchers.IO) { keyStore.getOrCreate(profile.vin) }
         _state.update { it.copy(fingerprint = TeslaKeys.fingerprint(keys.public)) }
@@ -137,6 +142,7 @@ class DriveController(private val context: Context, private val keyStore: Vehicl
                         is NavigationDestination.Active -> "차량 목적지를 확인했습니다"
                     })
                     failures = 0
+                    if (app.features.logbook.value) recordTrip(profile.vin, snapshot, batteryPoll, polledAt)
                     if (batteryPoll.due(polledAt)) readBattery(client, profile.vin, batteryPoll, snapshot.odometerKm)
                     // The 4s battery read fits inside the 5s drive cadence instead of delaying the next drive read.
                     withTimeoutOrNull((polledAt + 5000 - android.os.SystemClock.elapsedRealtime()).coerceAtLeast(1)) { refresh.receive() }
@@ -165,6 +171,7 @@ class DriveController(private val context: Context, private val keyStore: Vehicl
         val line = try {
             val charge = client.readChargeState()
             if (charge != null) recordBattery(vin, charge.battery)
+            charge?.batteryLevel?.let { level -> runCatching { app.trips.lateBattery(vin, level, System.currentTimeMillis()) } }
             val now = android.os.SystemClock.elapsedRealtime()
             poll.received(charge?.battery, now).also {
                 if (charge != null && app.features.logbook.value) recordCharge(vin, charge, odometerKm, poll, now)
@@ -177,23 +184,43 @@ class DriveController(private val context: Context, private val keyStore: Vehicl
         line?.let { note(it) }
     }
 
+    /** Never throws: the trip log is optional. Parking asks for a battery read right away so the trip gets a fresh end value. */
+    private fun recordTrip(vin: String, snapshot: DriveSnapshot, poll: BatteryPoll, now: Long) {
+        try {
+            app.trips.sample(vin, System.currentTimeMillis(), snapshot.gear, snapshot.speedKph, snapshot.odometerKm,
+                battery.value[vin]?.levelPercent)?.let { trip ->
+                poll.recheckBy(now)
+                note(tripLine(trip))
+            }
+        } catch (error: Exception) {
+            note("주행통계 기록 실패 · ${error.message?.take(160) ?: error.javaClass.simpleName}")
+        }
+    }
+
+    private fun finishTrip(vin: String) {
+        runCatching { app.trips.finish(vin) }.getOrNull()?.let { note(tripLine(it)) }
+    }
+
+    private fun tripLine(trip: dev.teslanavi.logbook.DriveTrip) =
+        String.format(Locale.KOREA, "주행통계 · 주행 기록 추가 %.1f km · %d분", trip.distanceKm, trip.durationMs / 60_000)
+
     /** The battery read feeds the logbook too; while a cable is in, read again soon so the unplug odometer is accurate. */
     private fun recordCharge(vin: String, charge: ChargeSnapshot, odometerKm: Double?, poll: BatteryPoll, now: Long) {
         val message = try {
             val detection = app.logbook.observe(vin, charge, odometerKm)
             if (detection == ChargeDetection.PluggedIn) poll.recheckBy(now + BatteryPoll.PLUGGED_RECHECK)
             when (detection) {
-                ChargeDetection.PluggedIn -> "차계부 · 충전 케이블 연결됨 · 분리 후 기록"
-                ChargeDetection.MissingEnergy -> "차계부 · 차량이 충전량을 제공하지 않음"
-                ChargeDetection.Baseline -> "차계부 · 마지막 충전량을 기준으로 저장"
-                ChargeDetection.Unchanged -> "차계부 · 새 충전 없음"
-                ChargeDetection.MissingOdometer -> "차계부 · 주행거리 정보가 없어 기록 대기"
-                ChargeDetection.AlreadyLogged -> "차계부 · 같은 주행거리의 충전 기록이 있어 건너뜀"
-                is ChargeDetection.NewCharge -> String.format(Locale.KOREA, "차계부 · 충전 기록 추가 %.1f kWh · %,.0f km",
+                ChargeDetection.PluggedIn -> "충전통계 · 충전 케이블 연결됨 · 분리 후 기록"
+                ChargeDetection.MissingEnergy -> "충전통계 · 차량이 충전량을 제공하지 않음"
+                ChargeDetection.Baseline -> "충전통계 · 마지막 충전량을 기준으로 저장"
+                ChargeDetection.Unchanged -> "충전통계 · 새 충전 없음"
+                ChargeDetection.MissingOdometer -> "충전통계 · 주행거리 정보가 없어 기록 대기"
+                ChargeDetection.AlreadyLogged -> "충전통계 · 같은 주행거리의 충전 기록이 있어 건너뜀"
+                is ChargeDetection.NewCharge -> String.format(Locale.KOREA, "충전통계 · 충전 기록 추가 %.1f kWh · %,.0f km",
                     detection.energyKwh, detection.odometerKm)
             }
         } catch (error: Exception) {
-            "차계부 기록 실패 · ${error.message?.take(160) ?: error.javaClass.simpleName}"
+            "충전통계 기록 실패 · ${error.message?.take(160) ?: error.javaClass.simpleName}"
         }
         if (message != lastChargeNote) note(message)
         lastChargeNote = message
