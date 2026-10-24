@@ -23,6 +23,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.automirrored.outlined.List
 import androidx.compose.material.icons.filled.Check
@@ -130,6 +131,7 @@ class MainActivity : ComponentActivity() {
                 val chargeEntries by app.logbook.entries.collectAsStateWithLifecycle()
                 var showGuidance by remember { mutableStateOf(false) }
                 var logbookVin by rememberSaveable { mutableStateOf<String?>(null) }
+                val guidanceActive = cameras.phase in setOf(CameraPhase.INITIALIZING, CameraPhase.WAITING_GPS, CameraPhase.GUIDING)
                 Surface(Modifier.fillMaxSize(), color = Ink) {
                     VehicleScreen(profiles, selected, state, selected?.let { batteries[it] }, cameras, hasKakaoKey, localError.value, autoEnabled, autoStatus, guidanceOptions,
                         onSettings = { showGuidance = true },
@@ -141,7 +143,8 @@ class MainActivity : ComponentActivity() {
                         onAutomatic = { enabled -> if (enabled) beginAutomatic() else AutoConnectService.disable(this) },
                         onMute = { app.cameras.setMuted(it) },
                         settingsTab = settingsTab, onSettingsTab = { app.features.setSettingsTab(it) },
-                        logbook = logbook, onLogbook = { app.features.setLogbook(it) }) { onOpenSettings ->
+                        logbook = logbook, onLogbook = { app.features.setLogbook(it) },
+                        guidancePage = { onBack -> GuidanceSettingsPage(app, guidanceActive, onBack) }) { onOpenSettings ->
                         // The logbook picks its own vehicle; it defaults to the connection selection but never changes it.
                         val profile = profiles.firstOrNull { it.vin == logbookVin } ?: profiles.firstOrNull { it.vin == selected } ?: profiles.firstOrNull()
                         LogbookScreen(state, onOpenSettings, profiles, profile, chargeEntries[profile?.vin].orEmpty(), wonPerKwh,
@@ -151,8 +154,7 @@ class MainActivity : ComponentActivity() {
                             onDelete = { id -> profile?.let { app.logbook.delete(it.vin, id) } })
                     }
                 }
-                if (showGuidance) GuidanceSettingsDialog(app,
-                    cameras.phase in setOf(CameraPhase.INITIALIZING, CameraPhase.WAITING_GPS, CameraPhase.GUIDING)) { showGuidance = false }
+                if (showGuidance) GuidanceSettingsDialog(app, guidanceActive) { showGuidance = false }
                 if (backgroundDisclosure.value) AlertDialog(
                     onDismissRequest = { backgroundDisclosure.value = false; pendingAutomatic = false },
                     title = { Text("자동 연결에 필요한 위치 권한") },
@@ -256,9 +258,12 @@ private fun VehicleScreen(profiles: List<VehicleProfile>, selected: String?, sta
     onAdd: (String, String) -> Unit, onSelect: (String) -> Unit, onConnect: (Boolean) -> Unit,
     onDisconnect: () -> Unit, onRefresh: () -> Unit, onAutomatic: (Boolean) -> Unit, onMute: (Boolean) -> Unit,
     settingsTab: Boolean, onSettingsTab: (Boolean) -> Unit, logbook: Boolean, onLogbook: (Boolean) -> Unit,
+    guidancePage: @Composable (onBack: () -> Unit) -> Unit,
     logbookScreen: @Composable (onOpenSettings: (() -> Unit)?) -> Unit) {
     // Without the settings tab feature, the main screen keeps every control and the top-right button opens the feature switches.
     var chosen by rememberSaveable { mutableStateOf(AppTab.MAIN) }
+    // Inside the settings tab, guidance settings open as a page one level down instead of the main screen's dialog.
+    var guidanceOpen by rememberSaveable { mutableStateOf(false) }
     var showFeatures by remember { mutableStateOf(false) }
     val tabs = listOfNotNull(AppTab.MAIN, AppTab.LOGBOOK.takeIf { logbook }, AppTab.SETTINGS.takeIf { settingsTab })
     val tab = chosen.takeIf { it in tabs } ?: AppTab.MAIN
@@ -290,6 +295,7 @@ private fun VehicleScreen(profiles: List<VehicleProfile>, selected: String?, sta
                     DestinationCard(selected, state, onRefresh)
                     if (!connected) CameraCard(cameras, hasKakaoKey, onMute, options)
                 }
+                guidanceOpen -> guidancePage { guidanceOpen = false }
                 else -> ScreenColumn {
                     Text("설정", fontSize = 25.sp, fontWeight = FontWeight.Bold)
                     AppCard {
@@ -299,13 +305,13 @@ private fun VehicleScreen(profiles: List<VehicleProfile>, selected: String?, sta
                     VehicleList(profiles, selected, state, onAdd, onSelect)
                     ConnectionCard(profiles, selected, state, localError, autoEnabled, onConnect, onDisconnect)
                     AutoConnectCard(profiles, autoEnabled, autoStatus, onAutomatic)
-                    GuidanceCard(options, onSettings)
+                    GuidanceCard(options) { guidanceOpen = true }
                     Diagnostics(selected, state)
                     VersionFooter()
                 }
             }
         }
-        if (tabs.size > 1) TabBar(tabs, tab) { chosen = it }
+        if (tabs.size > 1) TabBar(tabs, tab) { chosen = it; guidanceOpen = false }
     }
     if (showFeatures) AlertDialog(onDismissRequest = { showFeatures = false },
         title = { Text("설정") },
@@ -878,33 +884,63 @@ private fun VehicleDialog(onDismiss: () -> Unit, onSave: (String, String) -> Uni
 
 @Composable
 private fun GuidanceSettingsDialog(app: TeslaNaviApp, guidanceActive: Boolean, onDismiss: () -> Unit) {
+    AlertDialog(onDismissRequest = onDismiss,
+        title = { Text("안내 설정") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                GuidanceSettingsContent(app, guidanceActive) { content ->
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp), content = content)
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("닫기") } })
+}
+
+/** The settings tab's guidance page, one level below the settings list. Back returns to the list. */
+@Composable
+private fun GuidanceSettingsPage(app: TeslaNaviApp, guidanceActive: Boolean, onBack: () -> Unit) {
+    BackHandler(onBack = onBack)
+    ScreenColumn {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = onBack, modifier = Modifier.offset(x = (-12).dp)) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "뒤로")
+            }
+            Text("안내 설정", fontSize = 25.sp, fontWeight = FontWeight.Bold)
+        }
+        GuidanceSettingsContent(app, guidanceActive) { content -> AppCard(content) }
+    }
+}
+
+/** Guidance controls in four sections; the dialog stacks them and the page puts each in a card. Changes save immediately. */
+@Composable
+private fun GuidanceSettingsContent(app: TeslaNaviApp, guidanceActive: Boolean,
+    section: @Composable (@Composable ColumnScope.() -> Unit) -> Unit) {
     val settings = app.guidance
     val options by settings.options.collectAsStateWithLifecycle()
     val model by app.voiceModel.state.collectAsStateWithLifecycle()
     var volume by remember(options.volumePercent) { mutableFloatStateOf(options.volumePercent.toFloat()) }
     var highway by remember(options.highwayMeters) { mutableFloatStateOf(options.highwayMeters.toFloat()) }
     var general by remember(options.generalMeters) { mutableFloatStateOf(options.generalMeters.toFloat()) }
-    AlertDialog(onDismissRequest = onDismiss,
-        title = { Text("안내 설정") },
-        text = {
-            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("안내 음량 ${volume.roundToInt()}%", fontWeight = FontWeight.SemiBold)
-                Slider(value = volume, onValueChange = { volume = it }, onValueChangeFinished = { settings.volume(volume.roundToInt()) },
-                    valueRange = 0f..100f, steps = 19, modifier = Modifier.semantics { contentDescription = "안내 음량" })
-                Text("휴대폰 미디어 음량 기준 · 음성과 경고음에 함께 적용", fontSize = 12.sp, color = Muted)
-                GuidanceVoiceChoice(options.voice, model, onSelect = app::selectVoice, onDownload = app::downloadVoiceModel,
-                    onCancel = app.voiceModel::cancel, onDelete = app::deleteVoiceModel)
-                GuidanceSoundCheck(volume.roundToInt(), guidanceActive, app::guidanceSpeaker)
-                Text("고속도로 ${highway.roundToInt()} m 전", fontWeight = FontWeight.SemiBold)
-                Slider(value = highway, onValueChange = { highway = it }, onValueChangeFinished = { settings.highway(highway.roundToInt()) },
-                    valueRange = 100f..2000f, steps = 18, modifier = Modifier.semantics { contentDescription = "고속도로 안내 거리" })
-                Text("일반도로 ${general.roundToInt()} m 전", fontWeight = FontWeight.SemiBold)
-                Slider(value = general, onValueChange = { general = it }, onValueChangeFinished = { settings.general(general.roundToInt()) },
-                    valueRange = 100f..1000f, steps = 8, modifier = Modifier.semantics { contentDescription = "일반도로 안내 거리" })
-                Text("카메라 사전 안내와 +5 km/h 과속 경고 구간에 적용됩니다. 도로 종류를 모르면 고속도로 설정을 사용합니다.", fontSize = 12.sp, color = Muted)
-                Text("설정은 자동 저장됩니다. 카메라 정보 수신 시점에 따라 안내가 늦어질 수 있습니다.", fontSize = 12.sp, color = Muted)
-                TextButton(onClick = { settings.reset() }) { Text("기본값 복원") }
-            }
-        },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("닫기") } })
+    section {
+        Text("안내 음량 ${volume.roundToInt()}%", fontWeight = FontWeight.SemiBold)
+        Slider(value = volume, onValueChange = { volume = it }, onValueChangeFinished = { settings.volume(volume.roundToInt()) },
+            valueRange = 0f..100f, steps = 19, modifier = Modifier.semantics { contentDescription = "안내 음량" })
+        Text("휴대폰 미디어 음량 기준 · 음성과 경고음에 함께 적용", fontSize = 12.sp, color = Muted)
+    }
+    section {
+        GuidanceVoiceChoice(options.voice, model, onSelect = app::selectVoice, onDownload = app::downloadVoiceModel,
+            onCancel = app.voiceModel::cancel, onDelete = app::deleteVoiceModel)
+    }
+    section { GuidanceSoundCheck(volume.roundToInt(), guidanceActive, app::guidanceSpeaker) }
+    section {
+        Text("고속도로 ${highway.roundToInt()} m 전", fontWeight = FontWeight.SemiBold)
+        Slider(value = highway, onValueChange = { highway = it }, onValueChangeFinished = { settings.highway(highway.roundToInt()) },
+            valueRange = 100f..2000f, steps = 18, modifier = Modifier.semantics { contentDescription = "고속도로 안내 거리" })
+        Text("일반도로 ${general.roundToInt()} m 전", fontWeight = FontWeight.SemiBold)
+        Slider(value = general, onValueChange = { general = it }, onValueChangeFinished = { settings.general(general.roundToInt()) },
+            valueRange = 100f..1000f, steps = 8, modifier = Modifier.semantics { contentDescription = "일반도로 안내 거리" })
+        Text("카메라 사전 안내와 +5 km/h 과속 경고 구간에 적용됩니다. 도로 종류를 모르면 고속도로 설정을 사용합니다.", fontSize = 12.sp, color = Muted)
+        Text("설정은 자동 저장됩니다. 카메라 정보 수신 시점에 따라 안내가 늦어질 수 있습니다.", fontSize = 12.sp, color = Muted)
+        TextButton(onClick = { settings.reset() }) { Text("기본값 복원") }
+    }
 }

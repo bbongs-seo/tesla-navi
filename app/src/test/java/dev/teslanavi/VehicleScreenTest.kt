@@ -55,6 +55,28 @@ class VehicleScreenTest {
         compose.onNodeWithText("안내 설정").assertIsDisplayed()
     }
 
+    @Test fun settingsTabOpensGuidanceAsPageAndBackReturnsToSettingsList() {
+        compose.runOnIdle { ApplicationProvider.getApplicationContext<TeslaNaviApp>().features.setSettingsTab(true) }
+        compose.onNodeWithContentDescription("설정").performClick()
+        compose.onNodeWithText("안내 설정").performScrollTo().performClick()
+        compose.onNodeWithContentDescription("뒤로").assertIsDisplayed()
+        compose.onNodeWithText("안내 음성").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("닫기").assertDoesNotExist()
+        compose.onNodeWithContentDescription("하단 설정 탭").assertDoesNotExist()
+        compose.onNodeWithContentDescription("설정").assertIsSelected()
+        saveScreenshot("settings-guidance-page")
+        compose.runOnUiThread { compose.activity.onBackPressedDispatcher.onBackPressed() }
+        compose.onNodeWithContentDescription("하단 설정 탭").assertIsDisplayed()
+        compose.onNodeWithContentDescription("설정").assertIsSelected()
+        compose.onNodeWithText("안내 설정").performScrollTo().performClick()
+        compose.onNodeWithContentDescription("뒤로").performClick()
+        compose.onNodeWithContentDescription("하단 설정 탭").assertIsDisplayed()
+        compose.onNodeWithText("안내 설정").performScrollTo().performClick()
+        compose.onNodeWithContentDescription("메인").performClick()
+        compose.onNodeWithContentDescription("설정").performClick()
+        compose.onNodeWithContentDescription("하단 설정 탭").assertIsDisplayed()
+    }
+
     @Test fun soundChecksAreAvailableWithoutVehicleAndExplainZeroVolume() {
         compose.onNodeWithText("안내 설정").performClick()
         compose.onNodeWithText("카메라 음성 테스트").assertIsEnabled()
