@@ -4,6 +4,7 @@ import android.content.Context
 import dev.teslanavi.TeslaNaviApp
 import dev.teslanavi.BuildConfig
 import dev.teslanavi.ble.AndroidBleTransport
+import dev.teslanavi.data.BatteryStore
 import dev.teslanavi.data.VehicleKeyStore
 import dev.teslanavi.data.VehicleProfile
 import dev.teslanavi.protocol.*
@@ -36,6 +37,9 @@ class DriveController(private val context: Context, private val keyStore: Vehicl
     }
     private val _state = MutableStateFlow(DriveState(events = history.read()))
     val state = _state.asStateFlow()
+    // Kept outside DriveState so reconnects, failures and app restarts keep the last reading for the main screen.
+    private val batteryStore = BatteryStore(context)
+    val battery = batteryStore.readings
     private val refresh = Channel<Unit>(Channel.CONFLATED)
 
     fun prepare(vin: String, automatic: Boolean = false) {
@@ -50,6 +54,14 @@ class DriveController(private val context: Context, private val keyStore: Vehicl
         _state.update { it.copy(phase = phase ?: it.phase, status = message,
             events = events) }
     }
+    /** History-only line; unlike status() it leaves the status text (and notification) alone. */
+    private fun note(message: String) {
+        android.util.Log.i("TeslaNaviConnection", message)
+        val events = history.append("[${_state.value.phase}] $message")
+        _state.update { it.copy(events = events) }
+    }
+    internal fun recordBattery(vin: String, battery: BatterySnapshot, receivedAt: Long = System.currentTimeMillis()) =
+        batteryStore.save(vin, battery, receivedAt)
     fun fail(error: Throwable) {
         val message = when (error) {
             is TimeoutCancellationException -> "차량 응답 시간이 초과되었습니다. 차량 가까이에서 화면을 켜고 다시 연결해 주세요."
@@ -102,6 +114,7 @@ class DriveController(private val context: Context, private val keyStore: Vehicl
                 status("목적지 확인 중", DrivePhase.CONNECTED)
                 (context.applicationContext as TeslaNaviApp).autoConnect.verified(profile.vin)
                 var missedReads = 0
+                val batteryPoll = BatteryPoll()
                 while (currentCoroutineContext().isActive) {
                     val snapshot = try {
                         client.readDriveState().also { missedReads = 0 }
@@ -113,6 +126,7 @@ class DriveController(private val context: Context, private val keyStore: Vehicl
                         delay(1000)
                         continue
                     }
+                    val polledAt = android.os.SystemClock.elapsedRealtime()
                     val previous = _state.value.snapshot?.destination
                     _state.update { it.copy(snapshot = snapshot, updatedAt = System.currentTimeMillis(), error = null) }
                     if (previous != snapshot.destination) status(when (snapshot.destination) {
@@ -120,7 +134,9 @@ class DriveController(private val context: Context, private val keyStore: Vehicl
                         is NavigationDestination.Active -> "차량 목적지를 확인했습니다"
                     })
                     failures = 0
-                    withTimeoutOrNull(5000) { refresh.receive() }
+                    if (batteryPoll.due(polledAt)) readBattery(client, profile.vin, batteryPoll)
+                    // The 4s battery read fits inside the 5s drive cadence instead of delaying the next drive read.
+                    withTimeoutOrNull((polledAt + 5000 - android.os.SystemClock.elapsedRealtime()).coerceAtLeast(1)) { refresh.receive() }
                 }
             } catch (error: Exception) {
                 if (error is CancellationException && error !is TimeoutCancellationException) throw error
@@ -136,5 +152,19 @@ class DriveController(private val context: Context, private val keyStore: Vehicl
             } finally { client?.close() }
             delay((failures * 2000L).coerceAtMost(6000))
         }
+    }
+
+    /** Never throws except for cancellation: a missing or failed battery read must not end the drive session. */
+    private suspend fun readBattery(client: TeslaClient, vin: String, poll: BatteryPoll) {
+        val line = try {
+            val battery = client.readChargeState()
+            if (battery != null) recordBattery(vin, battery)
+            poll.received(battery, android.os.SystemClock.elapsedRealtime())
+        } catch (error: Exception) {
+            if (error is CancellationException && error !is TimeoutCancellationException) throw error
+            currentCoroutineContext().ensureActive()
+            poll.failed(error, android.os.SystemClock.elapsedRealtime())
+        }
+        line?.let { note(it) }
     }
 }

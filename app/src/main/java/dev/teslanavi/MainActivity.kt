@@ -47,12 +47,15 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import dev.teslanavi.data.BatteryReading
 import dev.teslanavi.data.VehicleProfile
+import dev.teslanavi.data.batteryAge
 import dev.teslanavi.drive.DrivePhase
 import dev.teslanavi.drive.DriveService
 import dev.teslanavi.drive.DriveState
 import dev.teslanavi.drive.AutoConnectService
 import dev.teslanavi.drive.AutoConnectSettings
+import dev.teslanavi.drive.BatteryPoll
 import dev.teslanavi.protocol.NavigationDestination
 import dev.teslanavi.protocol.VehicleIdentity
 import dev.teslanavi.navigation.*
@@ -110,9 +113,10 @@ class MainActivity : ComponentActivity() {
                 val autoStatus by app.autoConnect.status.collectAsStateWithLifecycle()
                 val guidanceOptions by app.guidance.options.collectAsStateWithLifecycle()
                 val settingsTab by app.features.settingsTab.collectAsStateWithLifecycle()
+                val batteries by app.drive.battery.collectAsStateWithLifecycle()
                 var showGuidance by remember { mutableStateOf(false) }
                 Surface(Modifier.fillMaxSize(), color = Ink) {
-                    VehicleScreen(profiles, selected, state, cameras, hasKakaoKey, localError.value, autoEnabled, autoStatus, guidanceOptions,
+                    VehicleScreen(profiles, selected, state, selected?.let { batteries[it] }, cameras, hasKakaoKey, localError.value, autoEnabled, autoStatus, guidanceOptions,
                         onSettings = { showGuidance = true },
                         onAdd = { model, vin -> app.vehicles.add(model, vin); app.drive.clear(); localError.value = null },
                         onSelect = { app.vehicles.select(it); app.drive.clear(); localError.value = null },
@@ -222,7 +226,7 @@ private enum class AppTab(val label: String, val icon: ImageVector, val selected
 }
 
 @Composable
-private fun VehicleScreen(profiles: List<VehicleProfile>, selected: String?, state: DriveState,
+private fun VehicleScreen(profiles: List<VehicleProfile>, selected: String?, state: DriveState, battery: BatteryReading?,
     cameras: CameraState, hasKakaoKey: Boolean, localError: String?, autoEnabled: Boolean, autoStatus: String, options: GuidanceOptions, onSettings: () -> Unit,
     onAdd: (String, String) -> Unit, onSelect: (String) -> Unit, onConnect: (Boolean) -> Unit,
     onDisconnect: () -> Unit, onRefresh: () -> Unit, onAutomatic: (Boolean) -> Unit, onMute: (Boolean) -> Unit,
@@ -232,12 +236,14 @@ private fun VehicleScreen(profiles: List<VehicleProfile>, selected: String?, sta
     var showFeatures by remember { mutableStateOf(false) }
     val tab = if (settingsTab) chosen else AppTab.MAIN
     val connected = state.phase == DrivePhase.CONNECTED
+    val batteryLive = connected && state.vin == selected
     BackHandler(enabled = tab != AppTab.MAIN) { chosen = AppTab.MAIN }
     Column(Modifier.fillMaxSize()) {
         Box(Modifier.weight(1f)) {
             when {
                 !settingsTab -> ScreenColumn {
                     MainHeader(state, onOpenSettings = { showFeatures = true })
+                    battery?.let { BatteryCard(it, batteryLive) }
                     GuidanceButton(onSettings)
                     if (connected) CameraCard(cameras, hasKakaoKey, onMute, options)
                     VehicleList(profiles, selected, state, onAdd, onSelect)
@@ -250,6 +256,7 @@ private fun VehicleScreen(profiles: List<VehicleProfile>, selected: String?, sta
                 }
                 tab == AppTab.MAIN -> ScreenColumn {
                     MainHeader(state, onOpenSettings = null)
+                    battery?.let { BatteryCard(it, batteryLive) }
                     if (connected) CameraCard(cameras, hasKakaoKey, onMute, options)
                     else StatusCard(profiles, selected, state, localError) { chosen = AppTab.SETTINGS }
                     DestinationCard(selected, state, onRefresh)
@@ -327,6 +334,34 @@ private fun MainHeader(state: DriveState, onOpenSettings: (() -> Unit)?) {
         if (onOpenSettings != null) IconButton(onClick = onOpenSettings, modifier = Modifier.offset(x = 8.dp)) {
             Icon(Icons.Outlined.Settings, contentDescription = "설정 열기", modifier = Modifier.size(26.dp))
         }
+    }
+}
+
+@Composable
+private fun BatteryCard(reading: BatteryReading, connected: Boolean) {
+    var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(Unit) { while (true) { now = System.currentTimeMillis(); delay(10_000) } }
+    val minutes = (now - reading.receivedAt).coerceAtLeast(0) / 60_000
+    // While disconnected, or once two scheduled reads are missed, keep the last value but mark it as not live.
+    val live = connected && minutes < 2 * BatteryPoll.INTERVAL / 60_000
+    val color = if (live) Mint else MaterialTheme.colorScheme.onSurface
+    Surface(Modifier.fillMaxWidth().semantics(mergeDescendants = true) { contentDescription = reading.summary },
+        shape = RoundedCornerShape(22.dp), color = Panel) {
+        Column(Modifier.padding(horizontal = 20.dp, vertical = 16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(32.dp)) {
+                reading.levelPercent?.let { BatteryValue("배터리", "$it%", color) }
+                reading.rangeKm?.let { BatteryValue("주행 가능", "${it.roundToInt()} km", color) }
+            }
+            Text(if (live) "${batteryAge(minutes)} 확인 · ${BatteryPoll.INTERVAL / 60_000}분마다 갱신" else "마지막 수신 ${batteryAge(minutes)}", color = Muted, fontSize = 12.sp)
+        }
+    }
+}
+
+@Composable
+private fun BatteryValue(label: String, value: String, color: Color) {
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Text(label, color = Muted, fontSize = 12.sp)
+        Text(value, fontSize = 24.sp, fontWeight = FontWeight.Bold, color = color, maxLines = 1)
     }
 }
 

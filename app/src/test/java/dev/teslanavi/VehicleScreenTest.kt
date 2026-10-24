@@ -8,6 +8,7 @@ import android.graphics.Canvas
 import androidx.test.core.app.ApplicationProvider
 import dev.teslanavi.data.FeatureSettings
 import dev.teslanavi.data.VehicleStore
+import dev.teslanavi.protocol.BatterySnapshot
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -114,6 +115,41 @@ class VehicleScreenTest {
         val reloaded = VehicleStore(app)
         org.junit.Assert.assertEquals(2, reloaded.vehicles.value.size)
         org.junit.Assert.assertEquals("5YJ3E1EA1MF111111", reloaded.selected.value)
+    }
+
+    @Test fun lastBatteryReadingShowsWithAgeOnBothMainLayouts() {
+        val app = ApplicationProvider.getApplicationContext<TeslaNaviApp>()
+        compose.runOnIdle {
+            app.vehicles.add("Model Y", "5YJYGDEE1NF123456")
+            app.drive.recordBattery("5YJYGDEE1NF123456", BatterySnapshot(78, 352.4), System.currentTimeMillis() - 12 * 60_000)
+        }
+        compose.onNodeWithContentDescription("배터리 78% · 주행 가능 352 km").assertIsDisplayed()
+        compose.onNodeWithText("78%", useUnmergedTree = true).assertIsDisplayed()
+        compose.onNodeWithText("352 km", useUnmergedTree = true).assertIsDisplayed()
+        compose.onNodeWithText("마지막 수신 12분 전", useUnmergedTree = true).assertIsDisplayed()
+        saveScreenshot("battery-main")
+        compose.runOnIdle { app.features.setSettingsTab(true) }
+        compose.onNodeWithContentDescription("메인").assertIsSelected()
+        compose.onNodeWithContentDescription("배터리 78% · 주행 가능 352 km").assertIsDisplayed()
+        compose.onNodeWithText("마지막 수신 12분 전", useUnmergedTree = true).assertIsDisplayed()
+        saveScreenshot("battery-settings-tab-main")
+    }
+
+    @Test fun batteryLineIsHiddenWithoutReadingForSelectedVehicle() {
+        val app = ApplicationProvider.getApplicationContext<TeslaNaviApp>()
+        compose.runOnIdle {
+            app.vehicles.add("Model 3", "5YJ3E1EA1MF111111")
+            app.vehicles.add("Model Y", "5YJYGDEE1NF222222")
+        }
+        compose.onNodeWithText("배터리", substring = true, useUnmergedTree = true).assertDoesNotExist()
+        compose.runOnIdle { app.drive.recordBattery("5YJYGDEE1NF222222", BatterySnapshot(64, null)) }
+        compose.onNodeWithContentDescription("배터리 64%").assertIsDisplayed()
+        compose.onNodeWithText("주행 가능", useUnmergedTree = true).assertDoesNotExist()
+        compose.onNodeWithText("마지막 수신 방금", useUnmergedTree = true).assertIsDisplayed()
+        compose.runOnIdle { app.vehicles.select("5YJ3E1EA1MF111111") }
+        compose.onNodeWithText("배터리", substring = true, useUnmergedTree = true).assertDoesNotExist()
+        compose.runOnIdle { app.drive.recordBattery("5YJ3E1EA1MF111111", BatterySnapshot(null, null)) }
+        compose.onNodeWithText("배터리", substring = true, useUnmergedTree = true).assertDoesNotExist()
     }
 
     private fun saveScreenshot(name: String) {

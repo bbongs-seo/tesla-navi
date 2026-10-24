@@ -1,5 +1,6 @@
 package dev.teslanavi.protocol
 
+import com.tesla.generated.carserver.vehicle.ChargeState
 import com.tesla.generated.carserver.vehicle.DriveState
 import com.tesla.generated.carserver.vehicle.ShiftState
 import java.security.MessageDigest
@@ -67,5 +68,17 @@ data class DriveSnapshot(
                 },
             )
         }
+    }
+}
+
+/** Rated range (battery_range), the figure the car screen and Tesla app show; out-of-range values become null. */
+data class BatterySnapshot(val levelPercent: Int?, val rangeKm: Double?) {
+    val empty get() = levelPercent == null && rangeKm == null
+
+    companion object {
+        fun from(state: ChargeState) = BatterySnapshot(
+            if (state.hasBatteryLevel()) state.batteryLevel.takeIf { it in 0..100 } else null,
+            if (state.hasBatteryRange()) state.batteryRange.toDouble().takeIf { it.isFinite() && it in 0.0..1000.0 }?.times(1.609344) else null,
+        )
     }
 }

@@ -1,7 +1,11 @@
 package dev.teslanavi.protocol
 
 import com.tesla.generated.carserver.common.LatLong
+import com.tesla.generated.carserver.server.ActionStatus
+import com.tesla.generated.carserver.server.OperationStatus_E
 import com.tesla.generated.carserver.server.Response
+import com.tesla.generated.carserver.server.ResultReason
+import com.tesla.generated.carserver.vehicle.ChargeState
 import com.tesla.generated.carserver.vehicle.DriveState
 import com.tesla.generated.carserver.vehicle.ShiftState
 import com.tesla.generated.carserver.vehicle.VehicleData
@@ -222,6 +226,60 @@ class ProtocolTest {
         vehicle.nextState = DriveState.newBuilder().setActiveRouteDestination("새 목적지").build()
         assertEquals("새 목적지", (client.readDriveState().destination as NavigationDestination.Active).name)
     }
+
+    @Test fun `battery uses rated range in km and ignores estimated range and usable level`() {
+        val state = ChargeState.newBuilder().setBatteryLevel(78).setUsableBatteryLevel(76)
+            .setBatteryRange(218.73f).setEstBatteryRange(190f).setIdealBatteryRange(240f).build()
+        val battery = BatterySnapshot.from(state)
+        assertEquals(78, battery.levelPercent)
+        assertEquals(218.73 * 1.609344, battery.rangeKm!!, 0.001)
+        assertEquals(BatterySnapshot(0, 0.0), BatterySnapshot.from(ChargeState.newBuilder().setBatteryLevel(0).setBatteryRange(0f).build()))
+    }
+
+    @Test fun `missing or abnormal battery fields become null without hiding the other field`() {
+        assertTrue(BatterySnapshot.from(ChargeState.getDefaultInstance()).empty)
+        // Only estimated values present: never substitute them for the rated figures.
+        assertTrue(BatterySnapshot.from(ChargeState.newBuilder().setUsableBatteryLevel(70).setEstBatteryRange(200f).build()).empty)
+        for (level in listOf(-1, 101, Int.MAX_VALUE)) {
+            val battery = BatterySnapshot.from(ChargeState.newBuilder().setBatteryLevel(level).setBatteryRange(100f).build())
+            assertNull(battery.levelPercent)
+            assertEquals(160.9344, battery.rangeKm!!, 0.0001)
+        }
+        for (miles in listOf(-0.5f, Float.NaN, Float.POSITIVE_INFINITY, 1000.5f)) {
+            val battery = BatterySnapshot.from(ChargeState.newBuilder().setBatteryLevel(50).setBatteryRange(miles).build())
+            assertEquals(50, battery.levelPercent)
+            assertNull(battery.rangeKm)
+        }
+    }
+
+    @Test fun `encrypted charge read separates data, absent charge state and vehicle refusal`() = runTest {
+        val keys = TeslaKeys.generate()
+        val vehicle = FakeVehicle(keys)
+        val client = TeslaClient(VIN, keys, vehicle)
+        client.authenticate()
+        vehicle.chargeState = ChargeState.newBuilder().setBatteryLevel(64).setBatteryRange(150f).build()
+        assertEquals(BatterySnapshot(64, 150 * 1.609344), client.readChargeState())
+        vehicle.chargeState = null
+        assertNull(client.readChargeState())
+        vehicle.chargeRefusal = "권한 없음"
+        assertEquals("차량 조회 실패: 권한 없음", assertFailsWith<IllegalStateException> { client.readChargeState() }.message)
+        vehicle.nextState = DriveState.newBuilder().setActiveRouteDestination("서울역").build()
+        assertEquals("서울역", (client.readDriveState().destination as NavigationDestination.Active).name)
+        assertEquals(listOf("charge", "charge", "charge", "drive"), vehicle.queries)
+    }
+
+    @Test fun `charge read session fault leaves session renewal to the drive read`() = runTest {
+        val keys = TeslaKeys.generate()
+        val vehicle = FakeVehicle(keys)
+        val client = TeslaClient(VIN, keys, vehicle)
+        client.authenticate()
+        vehicle.faults += 6
+        assertEquals(6, assertFailsWith<VehicleFault> { client.readChargeState() }.code)
+        assertEquals(1, vehicle.handshakes)
+        vehicle.faults += 6
+        client.readDriveState()
+        assertEquals(2, vehicle.handshakes)
+    }
 }
 
 private class FakeVehicle(private val phone: KeyPair) : VehicleTransport {
@@ -230,6 +288,11 @@ private class FakeVehicle(private val phone: KeyPair) : VehicleTransport {
     private val key = TeslaKeys.sharedKey(vehicle.private, TeslaKeys.publicBytes(phone.public))
     private val epoch = ByteArray(16) { (it + 1).toByte() }
     var nextState: DriveState = DriveState.getDefaultInstance()
+    var chargeState: ChargeState? = null
+    var chargeRefusal: String? = null
+    val faults = ArrayDeque<Int>()
+    val queries = mutableListOf<String>()
+    var handshakes = 0
     var corruptHandshake = false
     var plaintextResponse = false
     var corruptCiphertext = false
@@ -246,6 +309,7 @@ private class FakeVehicle(private val phone: KeyPair) : VehicleTransport {
             .setFromDestination(Destination.newBuilder().setDomain(Domain.DOMAIN_INFOTAINMENT))
             .setToDestination(request.fromDestination).setRequestUuid(request.uuid)
         if (request.hasSessionInfoRequest()) {
+            handshakes++
             beforeHandshake?.let { incoming.send(it(request)) }
             val info = SessionInfo.newBuilder().setCounter(10).setClockTime(200)
                 .setPublicKey(TeslaKeys.publicBytes(vehicle.public).bytes()).setEpoch(epoch.bytes()).build()
@@ -265,9 +329,20 @@ private class FakeVehicle(private val phone: KeyPair) : VehicleTransport {
                 5 to uint32(Integer.toUnsignedLong(signature.counter)), 7 to uint32(2)))
             val actionBytes = TeslaSession.crypt(Cipher.DECRYPT_MODE, key, signature.nonce.toByteArray(),
                 request.protobufMessageAsBytes.toByteArray() + signature.tag.toByteArray(), requestAad)
-            val action = com.tesla.generated.carserver.server.Action.parseFrom(actionBytes)
-            check(action.vehicleAction.getVehicleData.hasGetDriveState())
-            val response = Response.newBuilder().setVehicleData(VehicleData.newBuilder().setDriveState(nextState)).build().toByteArray()
+            val query = com.tesla.generated.carserver.server.Action.parseFrom(actionBytes).vehicleAction.getVehicleData
+            check(query.hasGetDriveState() != query.hasGetChargeState())
+            queries += if (query.hasGetDriveState()) "drive" else "charge"
+            faults.removeFirstOrNull()?.let {
+                incoming.send(reply.setSignedMessageStatus(MessageStatus.newBuilder().setSignedMessageFaultValue(it)).build().toByteArray())
+                return
+            }
+            val response = Response.newBuilder().apply {
+                if (query.hasGetDriveState()) setVehicleData(VehicleData.newBuilder().setDriveState(nextState))
+                else chargeRefusal?.let {
+                    setActionStatus(ActionStatus.newBuilder().setResult(OperationStatus_E.OPERATIONSTATUS_ERROR)
+                        .setResultReason(ResultReason.newBuilder().setPlainText(it)))
+                } ?: setVehicleData(VehicleData.newBuilder().apply { this@FakeVehicle.chargeState?.let { setChargeState(it) } })
+            }.build().toByteArray()
             if (plaintextResponse) reply.setProtobufMessageAsBytes(response.bytes())
             else {
                 val aad = MessageDigest.getInstance("SHA-256").digest(metadata(
