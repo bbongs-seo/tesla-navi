@@ -4,6 +4,13 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class KoreanSpeechTextTest {
+    @Test fun allTwelveSpeedLimitsUseTheRequestedReadings() {
+        listOf("십", "이십", "삼십", "사십", "오십", "육십", "칠십", "팔십", "구십", "백", "백십", "백이십")
+            .forEachIndexed { index, spoken ->
+                assertEquals("제한속도 ${spoken}킬로미터 초과입니다.",
+                    KoreanSpeechText.normalize("제한속도 ${(index + 1) * 10}킬로미터 초과입니다."))
+            }
+    }
     @Test fun guidanceNumbersUseSinoKoreanWithoutLeadingOne() {
         mapOf("0" to "영", "5" to "오", "10" to "십", "11" to "십일", "30" to "삼십", "50" to "오십", "60" to "육십",
             "100" to "백", "110" to "백십", "300" to "삼백", "1000" to "천", "1200" to "천이백", "2000" to "이천",

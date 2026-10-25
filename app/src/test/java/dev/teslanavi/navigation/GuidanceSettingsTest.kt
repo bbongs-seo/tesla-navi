@@ -49,4 +49,17 @@ class GuidanceSettingsTest {
         assertNotNull(presence.next(camera.copy(distanceMeters = 600), RoadClass.GENERAL, 0, options))
         assertFalse(speed.isOverSpeed(camera.copy(distanceMeters = 1201), 65.0, RoadClass.UNKNOWN, options))
     }
+
+    @Test fun supertonicSpeakerSurvivesRestartResetAndSwitchingToSystem() {
+        val settings = GuidanceSettings(context)
+        settings.supertonicSpeaker(SupertonicSpeaker.F3)
+        settings.voice(GuidanceVoice.SUPERTONIC)
+        settings.reset()
+        assertEquals(SupertonicSpeaker.F3, GuidanceSettings(context).options.value.supertonicSpeaker)
+        settings.voice(GuidanceVoice.SYSTEM)
+        assertEquals(SupertonicSpeaker.F3, GuidanceSettings(context).options.value.supertonicSpeaker)
+        context.getSharedPreferences("guidance-settings", Context.MODE_PRIVATE).edit()
+            .putString("supertonic-speaker", "UNKNOWN").commit()
+        assertEquals(SupertonicSpeaker.F1, GuidanceSettings(context).options.value.supertonicSpeaker)
+    }
 }

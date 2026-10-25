@@ -8,6 +8,17 @@ import org.junit.Test
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class GuidanceAudioPreviewTest {
+    @Test fun asynchronousPlaybackFailureIsShownInsteadOfReportingACompletedTest() = runTest {
+        val output = PreviewSpeaker()
+        val preview = GuidanceAudioPreview(backgroundScope) { output }
+        preview.play(PreviewSound.CAMERA_VOICE, 100); runCurrent()
+        advanceTimeBy(11_000); runCurrent()
+        assertFalse("longer synthesis must not be cut off at ten seconds", output.closed)
+        output.finish(false); runCurrent()
+        assertTrue(output.closed)
+        assertTrue(preview.state.value.message!!.contains("출력에 실패"))
+        assertNull(preview.state.value.playing)
+    }
     @Test fun cameraSampleUsesSelectedVolumeAndClosesAutomatically() = runTest {
         val output = PreviewSpeaker()
         val preview = GuidanceAudioPreview(backgroundScope) { output }
@@ -17,6 +28,7 @@ class GuidanceAudioPreviewTest {
         assertEquals(1, output.initializations)
         assertTrue(output.spoken.single().contains("300미터 앞"))
         assertEquals(PreviewSound.CAMERA_VOICE, preview.state.value.playing)
+        output.finish(true)
         advanceTimeBy(10_001); runCurrent()
         assertTrue(output.closed)
         assertNull(preview.state.value.playing)
@@ -88,6 +100,13 @@ class GuidanceAudioPreviewTest {
 }
 
 private class PreviewSpeaker : CameraSpeaker {
+    private var completed: ((Boolean) -> Unit)? = null
+    fun finish(success: Boolean) { completed?.invoke(success); completed = null }
+    override fun speak(text: String, onComplete: (Boolean) -> Unit): Boolean {
+        if (!speak(text)) return false
+        completed = onComplete
+        return true
+    }
     var appliedVolume = -1
     var alarm = false
     var closed = false

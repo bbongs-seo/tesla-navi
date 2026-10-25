@@ -75,6 +75,22 @@ class SupertonicVoiceTest {
         assertEquals("cache was cleared with the engine", 2, renderer.rendered.count { it == "주행시작" })
     }
 
+    @Test fun changingSpeakersNeverReusesAnotherSpeakersCachedAudio() = runBlocking {
+        var selected = SupertonicSpeaker.F1
+        val renderer = FakeRenderer()
+        val voice = SupertonicVoice({ dir }, { renderer }, speaker = { selected })
+        voice.load()
+        render(voice, "주행시작")
+        selected = SupertonicSpeaker.F2
+        render(voice, "주행시작")
+        render(voice, "주행시작")
+        selected = SupertonicSpeaker.M5
+        render(voice, "주행시작")
+        selected = SupertonicSpeaker.F1
+        render(voice, "주행시작")
+        assertEquals(listOf(0, 1, 9), renderer.speakers)
+    }
+
     private fun render(voice: SupertonicVoice, text: String): Pcm? {
         val result = CompletableFuture<Pcm?>()
         voice.render(text) { result.complete(it) }
@@ -84,12 +100,14 @@ class SupertonicVoiceTest {
 
 private class FakeRenderer(private val fail: Boolean = false) : SpeechRenderer {
     val rendered = mutableListOf<String>()
+    val speakers = mutableListOf<Int>()
     var released = false
     override val sampleRate = 24_000
     fun lengthOf(sentence: String) = sentence.length * 2
-    override fun render(sentence: String): FloatArray {
+    override fun render(sentence: String, speakerId: Int): FloatArray {
         if (fail) error("inference failed")
         rendered += sentence
+        speakers += speakerId
         return FloatArray(lengthOf(sentence)) { if (it == 0) 1000f / Short.MAX_VALUE else 0f }
     }
     override fun release() { released = true }

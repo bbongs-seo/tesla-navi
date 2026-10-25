@@ -9,6 +9,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -43,10 +45,12 @@ private val OptionIndent = 36.dp
 
 @Composable
 fun GuidanceVoiceChoice(selected: GuidanceVoice, model: ModelState, onSelect: (GuidanceVoice) -> Unit,
-    onDownload: () -> Unit, onCancel: () -> Unit, onDelete: () -> Unit) {
+    onDownload: () -> Unit, onCancel: () -> Unit, onDelete: () -> Unit,
+    speaker: SupertonicSpeaker = SupertonicSpeaker.F1, onSpeaker: (SupertonicSpeaker) -> Unit = {}) {
     val ready = model.phase == ModelPhase.READY
     val active = if (ready) selected else GuidanceVoice.SYSTEM
     var showInfo by remember { mutableStateOf(false) }
+    var showSpeakers by remember { mutableStateOf(false) }
     Column {
         Text("안내 음성", fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
         Spacer(Modifier.height(6.dp))
@@ -68,10 +72,33 @@ fun GuidanceVoiceChoice(selected: GuidanceVoice, model: ModelState, onSelect: (G
                     LinearProgressIndicator(progress = { model.progress }, modifier = Modifier.fillMaxWidth())
                     if (model.progress < 1f) InlineTextButton("받기 취소", onCancel)
                 }
-                ModelPhase.READY -> InlineTextButton("음성 모델 삭제", onDelete)
+                ModelPhase.READY -> {
+                    if (active == GuidanceVoice.SUPERTONIC) {
+                        OutlinedButton(onClick = { showSpeakers = true }, modifier = Modifier.fillMaxWidth()) {
+                            Text("목소리 변경 · ${speaker.label}")
+                        }
+                        Text("여성 5개 · 남성 5개 중 선택한 뒤 아래 카메라 음성 테스트로 들어보세요.", fontSize = 13.sp, color = Hint)
+                    }
+                    InlineTextButton("음성 모델 삭제", onDelete)
+                }
             }
         }
     }
+    if (showSpeakers) AlertDialog(onDismissRequest = { showSpeakers = false },
+        title = { Text("Supertonic 목소리") },
+        text = {
+            Column(Modifier.height(340.dp).verticalScroll(rememberScrollState())) {
+                SupertonicSpeaker.entries.forEach { option ->
+                    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+                        .selectable(speaker == option, role = Role.RadioButton, onClick = {
+                            onSpeaker(option); showSpeakers = false
+                        }).padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        RadioButton(selected = speaker == option, onClick = null)
+                        Text(option.label)
+                    }
+                }
+            }
+        }, confirmButton = { TextButton(onClick = { showSpeakers = false }) { Text("닫기") } })
     if (showInfo) AlertDialog(onDismissRequest = { showInfo = false },
         title = { Text("Supertonic 2 AI 음성") },
         text = {

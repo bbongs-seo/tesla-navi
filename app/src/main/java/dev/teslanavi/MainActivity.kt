@@ -1166,9 +1166,11 @@ private fun GuidanceSettingsContent(app: TeslaNaviApp, guidanceActive: Boolean,
     }
     section {
         GuidanceVoiceChoice(options.voice, model, onSelect = app::selectVoice, onDownload = app::downloadVoiceModel,
-            onCancel = app.voiceModel::cancel, onDelete = app::deleteVoiceModel)
+            onCancel = app.voiceModel::cancel, onDelete = app::deleteVoiceModel,
+            speaker = options.supertonicSpeaker, onSpeaker = settings::supertonicSpeaker)
     }
-    section { GuidanceSoundCheck(volume.roundToInt(), guidanceActive, app::guidanceSpeaker) }
+    section { GuidanceSoundCheck(volume.roundToInt(), guidanceActive, app::guidanceSpeaker,
+        selectionKey = "${options.voice}/${options.supertonicSpeaker}") }
     section {
         Text("고속도로 ${highway.roundToInt()} m 전", fontWeight = FontWeight.SemiBold)
         Slider(value = highway, onValueChange = { highway = it }, onValueChangeFinished = { settings.highway(highway.roundToInt()) },

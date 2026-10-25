@@ -16,6 +16,8 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.Locale
 import java.util.UUID
+import java.io.File
+import java.util.concurrent.ConcurrentHashMap
 
 class AndroidCameraSpeaker(private val context: Context,
     private val neural: PcmVoice? = null,
@@ -29,10 +31,13 @@ class AndroidCameraSpeaker(private val context: Context,
     private var voiceTrack: AudioTrack? = null
     private var track: AudioTrack? = null
     private var gain = 1f
-    override var needsInitialization = true
-        private set
+    private var engineNeedsInitialization = true
+    override var needsInitialization: Boolean
+        get() = engineNeedsInitialization || (preferred() == GuidanceVoice.SYSTEM && tts == null)
+        private set(value) { engineNeedsInitialization = value }
     private var completion: ((Boolean) -> Unit)? = null
     private var retryAfter = 0L
+    private val syntheses = ConcurrentHashMap<String, File>()
     private val speechTimeout = Runnable {
         utterance?.let { id ->
             record("speech timeout id=$id")
@@ -104,7 +109,7 @@ class AndroidCameraSpeaker(private val context: Context,
                         handler.postDelayed(speechTimeout, 30_000)
                     }
                 } }
-                override fun onDone(id: String?) { finished(id, true, "done") }
+                override fun onDone(id: String?) { synthesized(id) }
                 override fun onStop(id: String?, interrupted: Boolean) { finished(id, false, "stop") }
                 @Deprecated("Required by the Android TTS API")
                 override fun onError(id: String?) { finished(id, false, "error", rebuild = true) }
@@ -120,6 +125,29 @@ class AndroidCameraSpeaker(private val context: Context,
 
     private fun record(event: String) = AudioDiagnostics.record(context, event)
 
+    private fun synthesized(id: String?) {
+        if (id == null) return
+        val file = syntheses.remove(id) ?: return
+        // TTS callbacks run on its worker thread. File decoding never blocks the app's main thread.
+        val result = runCatching { SystemSpeechWave.read(file) }
+        file.delete()
+        handler.post {
+            if (id != utterance) return@post
+            val pcm = result.getOrNull()
+            if (pcm != null) record("system synthesis ready id=$id frames=${pcm.frames} rate=${pcm.sampleRate}")
+            if (pcm == null || !play(pcm, id, "system")) {
+                record("system PCM failed id=$id reason=${result.exceptionOrNull()?.javaClass?.simpleName ?: "output"}")
+                needsInitialization = true
+                finishCurrent(false)
+            }
+        }
+    }
+
+    private fun discardSyntheses() {
+        syntheses.values.forEach { it.delete() }
+        syntheses.clear()
+    }
+
     private fun finished(id: String?, success: Boolean, result: String, rebuild: Boolean = false) { handler.post {
         if (id != null && id == utterance) {
             record("speech $result id=$id")
@@ -129,6 +157,7 @@ class AndroidCameraSpeaker(private val context: Context,
     } }
 
     private fun finishCurrent(success: Boolean) {
+        discardSyntheses()
         handler.removeCallbacks(speechTimeout)
         utterance = null
         releaseVoiceTrack()
@@ -154,10 +183,10 @@ class AndroidCameraSpeaker(private val context: Context,
         val id = UUID.randomUUID().toString()
         utterance = id
         completion = onComplete
-        record("speech requested id=$id kind=${if (text == "주행시작") "trip" else "guidance"} gain=$gain musicVolume=${audio.getStreamVolume(AudioManager.STREAM_MUSIC)}")
+        record("speech requested id=$id kind=${if (text == "주행시작") "trip" else "guidance"} voice=${if (voice == null) "system" else "neural"} gain=$gain musicVolume=${audio.getStreamVolume(AudioManager.STREAM_MUSIC)}")
         handler.postDelayed(speechTimeout, 10_000)
         if (voice != null) {
-            voice.render(text) { pcm -> handler.post {
+            voice.render(KoreanSpeechText.normalize(text)) { pcm -> handler.post {
                 if (id != utterance) return@post
                 if (pcm != null && play(pcm, id)) return@post
                 record("neural render failed; system fallback id=$id")
@@ -169,9 +198,10 @@ class AndroidCameraSpeaker(private val context: Context,
     }
 
     private fun speakSystem(text: String, id: String): Boolean {
+        val file = File(context.cacheDir, "tts-$id.wav")
+        syntheses[id] = file
         val result = runCatching {
-            tts?.speak(text, TextToSpeech.QUEUE_FLUSH,
-                Bundle().apply { putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, gain) }, id)
+            tts?.synthesizeToFile(KoreanSpeechText.normalize(text), Bundle(), file, id)
         }.getOrNull()
         if (result != TextToSpeech.SUCCESS) {
             record("speech rejected id=$id result=$result")
@@ -185,10 +215,10 @@ class AndroidCameraSpeaker(private val context: Context,
     }
 
     private fun neuralVoice() = neural?.takeIf { preferred() == GuidanceVoice.SUPERTONIC && it.ready }
-    override fun prefetch(text: String) { neuralVoice()?.prefetch(text) }
+    override fun prefetch(text: String) { neuralVoice()?.prefetch(KoreanSpeechText.normalize(text)) }
 
     /** Static PCM playback. The marker ends the utterance; a timer covers devices that drop the marker callback. */
-    private fun play(pcm: Pcm, id: String): Boolean = runCatching {
+    private fun play(pcm: Pcm, id: String, source: String = "neural"): Boolean = runCatching {
         releaseVoiceTrack()
         val output = AudioTrack.Builder().setAudioAttributes(attributes)
             .setAudioFormat(AudioFormat.Builder().setSampleRate(pcm.sampleRate).setEncoding(AudioFormat.ENCODING_PCM_16BIT)
@@ -199,13 +229,14 @@ class AndroidCameraSpeaker(private val context: Context,
         output.setVolume(gain)
         output.notificationMarkerPosition = pcm.frames
         output.setPlaybackPositionUpdateListener(object : AudioTrack.OnPlaybackPositionUpdateListener {
-            override fun onMarkerReached(track: AudioTrack?) = finished(id, true, "neural done")
+            override fun onMarkerReached(track: AudioTrack?) = finished(id, true, "$source playback done")
             override fun onPeriodicNotification(track: AudioTrack?) = Unit
         }, handler)
         handler.removeCallbacks(speechTimeout)
-        handler.postDelayed({ finished(id, true, "neural done") }, pcm.millis + 1000)
+        handler.postDelayed({ finished(id, true, "$source playback done") }, pcm.millis + 1000)
         output.play()
-    }.onFailure { android.util.Log.w("TeslaNaviAudio", "Supertonic 음성 출력 실패", it); releaseVoiceTrack() }.isSuccess
+        record("$source playback started id=$id duration=${pcm.millis} gain=$gain")
+    }.onFailure { android.util.Log.w("TeslaNaviAudio", "음성 PCM 출력 실패", it); releaseVoiceTrack() }.isSuccess
 
     private fun releaseVoiceTrack() { voiceTrack?.let { runCatching { it.stop() }; it.release() }; voiceTrack = null }
 
@@ -247,6 +278,7 @@ class AndroidCameraSpeaker(private val context: Context,
         val callback = completion
         completion = null
         tts?.stop()
+        discardSyntheses()
         callback?.invoke(false)
         if (!alarm) releaseFocus()
     }

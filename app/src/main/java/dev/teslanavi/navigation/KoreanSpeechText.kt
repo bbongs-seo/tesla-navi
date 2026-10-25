@@ -1,8 +1,8 @@
 package dev.teslanavi.navigation
 
 /**
- * Text for the Supertonic voice. The model reads raw digits inconsistently (30 as 서른 or 삼십),
- * so numbers are spelled out in Sino-Korean, and characters outside its vocabulary become spaces.
+ * Shared text for system and Supertonic speech. Raw digits can be read inconsistently,
+ * so numbers are spelled out in Sino-Korean, and separators become spaces.
  */
 object KoreanSpeechText {
     private const val DIGITS = "영일이삼사오육칠팔구"

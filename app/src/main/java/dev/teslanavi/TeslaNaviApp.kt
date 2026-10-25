@@ -24,7 +24,7 @@ class TeslaNaviApp : Application() {
     val logbookSettings by lazy { LogbookSettings(this) }
     val logbook by lazy { LogbookStore(this) }
     val voiceModel by lazy { SupertonicModel(noBackupFilesDir, MainScope()) }
-    val supertonic by lazy { SupertonicVoice(voiceModel::installedDir) }
+    val supertonic by lazy { SupertonicVoice(voiceModel::installedDir, speaker = { guidance.options.value.supertonicSpeaker }) }
     val trips by lazy { TripStore(this) }
     val cameras by lazy {
         CameraController(KakaoNavigationEngine(this, kakao), guidanceSpeaker(), guidance.options, android.os.SystemClock::elapsedRealtime)

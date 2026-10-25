@@ -4,6 +4,8 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
@@ -42,11 +44,14 @@ class GuidanceAudioPreview(
                             mutable.value = AudioPreviewState(message = error)
                             return@launch
                         }
-                        if (!output.speak("300미터 앞 과속 단속 카메라가 있습니다. 제한속도 시속 60킬로미터입니다.")) {
+                        val completed = CompletableDeferred<Boolean>()
+                        if (!output.speak("300미터 앞 과속 단속 카메라가 있습니다. 제한속도 시속 60킬로미터입니다.") { completed.complete(it) }) {
                             mutable.value = AudioPreviewState(message = "음성을 재생하지 못했습니다. 잠시 후 다시 테스트해 주세요.")
                             return@launch
                         }
-                        delay(10_000)
+                        if (withTimeoutOrNull(45_000) { completed.await() } != true) {
+                            mutable.value = AudioPreviewState(message = "음성 출력에 실패했습니다. 기본 음성 데이터와 출력 기기를 확인해 주세요.")
+                        }
                     }
                     PreviewSound.OVERSPEED_CHIME -> {
                         output.setOverSpeedAlert(true)

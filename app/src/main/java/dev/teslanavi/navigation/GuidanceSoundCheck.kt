@@ -16,13 +16,14 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 
 @Composable
-fun GuidanceSoundCheck(volumePercent: Int, guidanceActive: Boolean, createSpeaker: () -> CameraSpeaker) {
+fun GuidanceSoundCheck(volumePercent: Int, guidanceActive: Boolean, createSpeaker: () -> CameraSpeaker, selectionKey: String = "") {
     val scope = rememberCoroutineScope()
     val preview = remember(scope) { GuidanceAudioPreview(scope, createSpeaker) }
     val state by preview.state.collectAsStateWithLifecycle()
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     LaunchedEffect(volumePercent) { preview.setVolume(volumePercent) }
     LaunchedEffect(guidanceActive) { if (guidanceActive) preview.stop() }
+    LaunchedEffect(selectionKey) { preview.stop() }
     DisposableEffect(preview, lifecycle) {
         val observer = LifecycleEventObserver { _, event -> if (event == Lifecycle.Event.ON_STOP) preview.stop() }
         lifecycle.addObserver(observer)

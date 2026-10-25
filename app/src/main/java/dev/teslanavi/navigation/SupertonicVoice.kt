@@ -29,7 +29,7 @@ interface PcmVoice {
 /** One sentence to float PCM. Production wraps sherpa-onnx; tests substitute a fake. */
 interface SpeechRenderer {
     val sampleRate: Int
-    fun render(sentence: String): FloatArray
+    fun render(sentence: String, speakerId: Int): FloatArray
     fun release()
 }
 
@@ -46,8 +46,8 @@ class SupertonicRenderer(dir: File) : SpeechRenderer {
             voiceStyle = File(dir, "voice.bin").path),
         numThreads = 2, debug = false)))
     override val sampleRate = tts.sampleRate()
-    override fun render(sentence: String): FloatArray = tts.generateWithConfig(sentence,
-        GenerationConfig(sid = 0, speed = 1.2f, numSteps = 5, extra = mapOf("lang" to "ko"))).samples
+    override fun render(sentence: String, speakerId: Int): FloatArray = tts.generateWithConfig(sentence,
+        GenerationConfig(sid = speakerId, speed = 1.2f, numSteps = 5, extra = mapOf("lang" to "ko"))).samples
     override fun release() = tts.release()
 }
 
@@ -59,6 +59,7 @@ class SupertonicVoice(
     private val model: () -> File?,
     private val open: (File) -> SpeechRenderer = ::SupertonicRenderer,
     private val cacheSamples: Int = 44_100 * 90,
+    private val speaker: () -> SupertonicSpeaker = { SupertonicSpeaker.F1 },
 ) : PcmVoice {
     private val executor = Executors.newSingleThreadExecutor { Thread(it, "supertonic").apply { isDaemon = true } }
     private val dispatcher = executor.asCoroutineDispatcher()
@@ -66,19 +67,23 @@ class SupertonicVoice(
     private val boundary = Regex("""(?<=[.!?])\s+""")
     // Owned by the executor thread.
     private var renderer: SpeechRenderer? = null
-    private val cache = LinkedHashMap<String, Pcm>(16, .75f, true)
+    private val cache = LinkedHashMap<Pair<Int, String>, Pcm>(16, .75f, true)
     private var cachedSamples = 0
     @Volatile override var ready = false
         private set
 
     override suspend fun load(): String? = withContext(dispatcher) { loadNow() }
     fun warmUp() = submit { loadNow() }
-    override fun render(text: String, done: (Pcm?) -> Unit) = submit { done(runCatching { compose(text) }.getOrNull()) }
+    override fun render(text: String, done: (Pcm?) -> Unit) {
+        val sid = speaker().sid
+        submit { done(runCatching { compose(text, sid) }.getOrNull()) }
+    }
 
     /** Prepares sentences while the voice is idle; never delays an announcement already queued. */
     override fun prefetch(text: String) {
         if (!ready || queued.get() > 0) return
-        submit { runCatching { sentences(text).forEach(::sentence) } }
+        val sid = speaker().sid
+        submit { runCatching { sentences(text).forEach { sentence(it, sid) } } }
     }
 
     fun release() {
@@ -100,8 +105,8 @@ class SupertonicVoice(
 
     private fun sentences(text: String) = text.split(boundary).map(KoreanSpeechText::normalize).filter(String::isNotEmpty)
 
-    private fun compose(text: String): Pcm? {
-        val parts = sentences(text).map { sentence(it) ?: return null }
+    private fun compose(text: String, sid: Int): Pcm? {
+        val parts = sentences(text).map { sentence(it, sid) ?: return null }
         if (parts.size <= 1) return parts.firstOrNull()
         val joined = ByteArray(parts.sumOf { it.bytes.size })
         var at = 0
@@ -109,10 +114,11 @@ class SupertonicVoice(
         return Pcm(joined, parts.first().sampleRate)
     }
 
-    private fun sentence(text: String): Pcm? {
-        cache[text]?.let { return it }
+    private fun sentence(text: String, sid: Int): Pcm? {
+        val key = sid to text
+        cache[key]?.let { return it }
         val engine = renderer ?: return null
-        val floats = engine.render(text).takeIf { it.isNotEmpty() } ?: return null
+        val floats = engine.render(text, sid).takeIf { it.isNotEmpty() } ?: return null
         val bytes = ByteArray(floats.size * 2)
         floats.forEachIndexed { i, sample ->
             val value = (sample.coerceIn(-1f, 1f) * Short.MAX_VALUE).roundToInt()
@@ -120,7 +126,7 @@ class SupertonicVoice(
             bytes[2 * i + 1] = (value shr 8).toByte()
         }
         val pcm = Pcm(bytes, engine.sampleRate)
-        cache[text] = pcm
+        cache[key] = pcm
         cachedSamples += pcm.frames
         val oldest = cache.values.iterator()
         while (cachedSamples > cacheSamples && cache.size > 1) {
