@@ -74,8 +74,10 @@ class AndroidCameraSpeaker(private val context: Context,
     override suspend fun initialize(): String? {
         val systemError = initializeSystemVoice()
         val voice = neural?.takeIf { preferred() == GuidanceVoice.SUPERTONIC } ?: return systemError
+        val loading = SystemClock.elapsedRealtime()
         val error = voice.load()
         if (error != null) { record("neural init failed; system fallback"); return systemError }
+        record("Supertonic 엔진 준비 ${SystemClock.elapsedRealtime() - loading}ms")
         needsInitialization = false
         voice.prefetch("주행시작")
         return null
@@ -186,9 +188,13 @@ class AndroidCameraSpeaker(private val context: Context,
         record("speech requested id=$id kind=${if (text == "주행시작") "trip" else "guidance"} voice=${if (voice == null) "system" else "neural"} gain=$gain musicVolume=${audio.getStreamVolume(AudioManager.STREAM_MUSIC)}")
         handler.postDelayed(speechTimeout, 10_000)
         if (voice != null) {
+            val requested = SystemClock.elapsedRealtime()
             voice.render(KoreanSpeechText.normalize(text)) { pcm -> handler.post {
                 if (id != utterance) return@post
-                if (pcm != null && play(pcm, id)) return@post
+                if (pcm != null && play(pcm, id)) {
+                    record("Supertonic 출력까지 ${SystemClock.elapsedRealtime() - requested}ms · 음성 ${pcm.millis}ms")
+                    return@post
+                }
                 record("neural render failed; system fallback id=$id")
                 speakSystem(text, id)
             } }
